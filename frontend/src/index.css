@@ -1,0 +1,161 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ─── Base typography ─────────────────────────────────────────────────── */
+@layer base {
+  :root {
+    /* Apple neutral palette as CSS vars for easy one-off use */
+    --color-text-primary:   #1d1d1f;
+    --color-text-secondary: #6e6e73;
+    --color-text-tertiary:  #aeaeb2;
+    --color-border:         #d2d2d7;
+    --color-surface:        #f5f5f7;
+    --color-card:           #ffffff;
+    --color-accent:         #0071e3;
+  }
+
+  html {
+    /* Optical sizing – Inter variable font renders sharper at small sizes */
+    font-optical-sizing: auto;
+    text-rendering: optimizeLegibility;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+
+  body {
+    background-color: var(--color-surface);
+    color: var(--color-text-primary);
+    /* Inter variable + OpenType features matching SF Pro feel */
+    font-feature-settings: 'kern' 1, 'liga' 1, 'calt' 1, 'ss01' 1;
+    font-variation-settings: 'opsz' 14;
+  }
+
+  /* Headings: tight tracking like SF Pro Display */
+  h1, h2, h3, h4, h5, h6 {
+    color: var(--color-text-primary);
+    letter-spacing: -0.018em;
+    font-weight: 600;
+  }
+
+  /* Muted body copy */
+  p, li {
+    color: var(--color-text-secondary);
+    letter-spacing: -0.002em;
+  }
+
+  /* Inputs + selects inherit the body stack */
+  input, select, textarea, button {
+    font-family: inherit;
+  }
+
+  * {
+    border-color: var(--color-border);
+  }
+}
+
+/* ─── Components ──────────────────────────────────────────────────────── */
+@layer components {
+
+  /* File drop zone */
+  .dropzone {
+    @apply border-2 border-dashed rounded-xl p-6 text-center cursor-pointer
+           transition-all duration-200;
+    border-color: var(--color-border);
+  }
+  .dropzone:hover,
+  .dropzone.active {
+    border-color: var(--color-accent);
+    background-color: rgb(0 113 227 / 0.04);
+  }
+
+  /* Data table – Inter at small optical size, SF Pro-like column heads */
+  .data-table {
+    @apply w-full text-left;
+    font-size: 0.8125rem;
+    font-variation-settings: 'opsz' 12;
+  }
+  .data-table th {
+    @apply px-3 py-2 border-b font-medium;
+    background-color: var(--color-surface);
+    color: var(--color-text-secondary);
+    font-size: 0.6875rem;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+  }
+  .data-table td {
+    @apply px-3 py-2;
+    border-bottom: 1px solid rgb(210 210 215 / 0.6);
+    color: var(--color-text-primary);
+  }
+  .data-table tr:hover td {
+    background-color: rgb(0 0 0 / 0.015);
+  }
+
+  /* Buttons — Apple-flavoured pill/rect shape */
+  .btn {
+    @apply inline-flex items-center justify-center gap-1.5 font-medium
+           transition-all duration-150 select-none;
+    padding: 0.375rem 0.875rem;
+    font-size: 0.8125rem;
+    letter-spacing: -0.005em;
+    border-radius: 0.5rem;
+  }
+  .btn-primary {
+    background-color: var(--color-accent);
+    color: #fff;
+  }
+  .btn-primary:hover   { background-color: #0077ed; }
+  .btn-primary:active  { background-color: #006edb; }
+  .btn-primary:disabled { opacity: 0.45; cursor: not-allowed; }
+
+  .btn-secondary {
+    background-color: var(--color-card);
+    color: var(--color-text-primary);
+    border: 1px solid var(--color-border);
+  }
+  .btn-secondary:hover  { background-color: var(--color-surface); }
+  .btn-secondary:active { background-color: #ebebed; }
+
+  /* Cards — same material as apple.com product cards */
+  .card {
+    background-color: var(--color-card);
+    border: 1px solid var(--color-border);
+    border-radius: 0.75rem;
+    /* Very subtle shadow, characteristic of Apple UI */
+    box-shadow: 0 1px 3px rgb(0 0 0 / 0.04), 0 1px 2px rgb(0 0 0 / 0.06);
+  }
+
+  /* Inputs */
+  .input {
+    @apply w-full transition-colors duration-150;
+    padding: 0.3125rem 0.75rem;
+    font-size: 0.8125rem;
+    letter-spacing: -0.003em;
+    border: 1px solid var(--color-border);
+    border-radius: 0.5rem;
+    background-color: var(--color-card);
+    color: var(--color-text-primary);
+    outline: none;
+  }
+  .input:focus {
+    border-color: var(--color-accent);
+    box-shadow: 0 0 0 3px rgb(0 113 227 / 0.15);
+  }
+  .input::placeholder { color: var(--color-text-tertiary); }
+
+  /* Badges */
+  .badge {
+    @apply inline-flex items-center font-medium;
+    padding: 0.125rem 0.5rem;
+    font-size: 0.6875rem;
+    letter-spacing: 0.01em;
+    border-radius: 99px;
+  }
+  .badge-blue  { background-color: #e8f0fd; color: #1352cc; }
+  .badge-green { background-color: #e4f5ec; color: #1a7a3f; }
+  .badge-gray  {
+    background-color: rgb(142 142 147 / 0.12);
+    color: var(--color-text-secondary);
+  }
+}
