@@ -85,11 +85,13 @@ async def upload_multiple_files(files: List[UploadFile] = File(...)):
 
 
 @router.get("/")
-async def list_files():
+async def list_files(include_generated: bool = False):
     """
-    List all uploaded files
+    List uploaded files. Generated/comparison output files are excluded by default.
     """
     files = FileService.list_files()
+    if not include_generated:
+        files = [f for f in files if not f.get('is_generated', False)]
     return {"files": files, "count": len(files)}
 
 

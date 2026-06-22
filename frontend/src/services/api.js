@@ -127,6 +127,15 @@ export const updateRows = async (fileId, updates) => {
   return response.data;
 };
 
+export const deleteRows = async (fileId, rowIndices) => {
+  const response = await api.post('/cleaning/delete-rows', {
+    file_id: fileId,
+    row_indices: rowIndices,
+  });
+  return response.data;
+};
+
+
 export const reorderColumns = async (fileId, columnOrder) => {
   const response = await api.post('/cleaning/reorder-columns', {
     file_id: fileId,
@@ -145,6 +154,16 @@ export const deleteColumn = async (fileId, columnName) => {
 
 export const addFormulaColumn = async (options) => {
   const response = await api.post('/cleaning/add-formula-column', options);
+  return response.data;
+};
+
+export const addColumn = async (fileId, columnName, referenceColumn = null, position = 'end') => {
+  const response = await api.post('/cleaning/add-column', {
+    file_id: fileId,
+    column_name: columnName,
+    reference_column: referenceColumn,
+    position,
+  });
   return response.data;
 };
 
@@ -171,6 +190,45 @@ export const generateAllowanceFiles = async (options) => {
 
 export const identifyColumns = async (fileId) => {
   const response = await api.get(`/comparison/${fileId}/identify-columns`);
+  return response.data;
+};
+
+// Reconciliation endpoints
+export const listReconciliationRuns = async () => {
+  const response = await api.get('/reconciliation/');
+  return response.data;
+};
+
+export const getDashboardSummary = async () => {
+  const response = await api.get('/reconciliation/dashboard/summary');
+  return response.data;
+};
+
+export const getReconciliationRun = async (runId) => {
+  const response = await api.get(`/reconciliation/${runId}`);
+  return response.data;
+};
+
+export const applyReconciliationAction = async (runId, issueId, action, note = '') => {
+  const response = await api.post(`/reconciliation/${runId}/issues/${issueId}/action`, {
+    action,
+    note,
+  });
+  return response.data;
+};
+
+export const exportApprovedReconciliationUpdates = async (runId) => {
+  const response = await api.post(`/reconciliation/${runId}/export-approved`);
+  return response.data;
+};
+
+export const getReconciliationReport = async (runId) => {
+  const response = await api.get(`/reconciliation/${runId}/report`);
+  return response.data;
+};
+
+export const exportReconciliationReport = async (runId) => {
+  const response = await api.post(`/reconciliation/${runId}/report/export`);
   return response.data;
 };
 

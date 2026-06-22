@@ -38,8 +38,8 @@ export default function Layout({ children }) {
 
       <div className="flex">
         {/* Sidebar */}
-        <aside className="w-44 min-h-[calc(100vh-2.75rem)] shrink-0"
-               style={{ backgroundColor: 'var(--color-card)', borderRight: '1px solid var(--color-border)' }}>
+        <aside className="sticky top-11 self-start w-44 shrink-0 overflow-y-auto"
+               style={{ backgroundColor: 'var(--color-card)', borderRight: '1px solid var(--color-border)', maxHeight: 'calc(100vh - 2.75rem)' }}>
           <nav className="p-2 space-y-0.5 pt-3">
             {navItems.map((item) => {
               const Icon = item.icon;
@@ -65,10 +65,8 @@ export default function Layout({ children }) {
         </aside>
 
         {/* Main Content */}
-        <main className="flex-1 p-5">
-          <div className="max-w-5xl mx-auto">
-            {children}
-          </div>
+        <main className="flex-1 p-5 pr-8">
+          {children}
         </main>
       </div>
     </div>

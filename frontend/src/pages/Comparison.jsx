@@ -9,6 +9,9 @@ import {
   compareEmployeeData,
   generateAllowanceFiles,
   identifyColumns,
+  getReconciliationRun,
+  applyReconciliationAction,
+  exportApprovedReconciliationUpdates,
   downloadCsv,
 } from '../services/api';
 
@@ -266,6 +269,10 @@ export default function Comparison() {
   const [loading, setLoading] = useState(false);
   const [result, setResult] = useState(null);
   const [errorDetails, setErrorDetails] = useState(null);
+  const [reconciliationRun, setReconciliationRun] = useState(null);
+  const [reconciliationActionId, setReconciliationActionId] = useState('');
+  const [reconciliationExport, setReconciliationExport] = useState(null);
+  const [exportingReconciliation, setExportingReconciliation] = useState(false);
 
   const [salaryOptions, setSalaryOptions] = useState({
     idCol1: '',
@@ -564,6 +571,15 @@ export default function Comparison() {
         tolerance: Number(dataOptions.tolerance) || 0.01,
       });
       setResult({ type: 'employee-data', ...data });
+      setReconciliationExport(null);
+      if (data.reconciliation_run?.id) {
+        await refreshReconciliationRun(data.reconciliation_run.id);
+      } else {
+        setReconciliationRun(null);
+      }
+      if (data.reconciliation_warning && !silent) {
+        toast.error(`Audit summary completed, but review setup failed: ${data.reconciliation_warning}`);
+      }
       clearErrorDetails();
       if (!silent) {
         toast.success('Payroll audit completed');
@@ -607,11 +623,59 @@ export default function Comparison() {
     window.open(downloadCsv(fileId), '_blank');
   }
 
+  async function refreshReconciliationRun(runId) {
+    try {
+      const run = await getReconciliationRun(runId);
+      setReconciliationRun(run);
+      return run;
+    } catch {
+      toast.error('Failed to load reconciliation review');
+      return null;
+    }
+  }
+
+  async function handleReconciliationAction(issueId, action) {
+    const runId = reconciliationRun?.id;
+    if (!runId) return;
+    setReconciliationActionId(issueId);
+    try {
+      const run = await applyReconciliationAction(runId, issueId, action);
+      setReconciliationRun(run);
+      setReconciliationExport(null);
+    } catch (error) {
+      toast.error(error.response?.data?.detail || 'Failed to update issue');
+    } finally {
+      setReconciliationActionId('');
+    }
+  }
+
+  async function handleExportApprovedUpdates() {
+    const runId = reconciliationRun?.id;
+    if (!runId) return;
+    setExportingReconciliation(true);
+    try {
+      const data = await exportApprovedReconciliationUpdates(runId);
+      setReconciliationExport(data);
+      toast.success(`Generated ${Object.keys(data.files || {}).length} update file(s)`);
+    } catch (error) {
+      toast.error(error.response?.data?.detail || 'Failed to export approved updates');
+    } finally {
+      setExportingReconciliation(false);
+    }
+  }
+
   const selectedFileNames = useMemo(() => {
     const fileA = files.find((file) => file.id === file1)?.filename;
     const fileB = files.find((file) => file.id === file2)?.filename;
     return { fileA, fileB };
   }, [files, file1, file2]);
+
+  const visibleReconciliationIssues = useMemo(
+    () => (reconciliationRun?.issues || []).slice(0, 40),
+    [reconciliationRun]
+  );
+
+  const approvedIssueCount = reconciliationRun?.status_counts?.approved || 0;
 
   return (
     <div className="space-y-4">
@@ -953,6 +1017,138 @@ export default function Comparison() {
                   </button>
                 ))}
               </div>
+            </div>
+          )}
+
+          {reconciliationRun && (
+            <div className="card p-4 space-y-4">
+              <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+                <div>
+                  <h2 className="text-sm font-medium text-slate-900">Reconciliation Review Workbench</h2>
+                  <p className="text-xs text-slate-500 mt-1">
+                    Approve valid HR changes, reject incorrect differences, or ignore items that do not need action.
+                  </p>
+                </div>
+                <div className="flex flex-wrap gap-1.5">
+                  {Object.entries(reconciliationRun.status_counts || {}).map(([status, count]) => (
+                    <span key={status} className="badge badge-gray">{status}: {formatNumber(count)}</span>
+                  ))}
+                  <button
+                    onClick={handleExportApprovedUpdates}
+                    disabled={exportingReconciliation || approvedIssueCount === 0}
+                    className="btn btn-primary text-xs disabled:opacity-40"
+                  >
+                    {exportingReconciliation ? 'Exporting...' : 'Export Approved HR Updates'}
+                  </button>
+                </div>
+              </div>
+
+              {reconciliationExport?.files && Object.keys(reconciliationExport.files).length > 0 && (
+                <div className="rounded-md border border-emerald-100 bg-emerald-50 p-3">
+                  <div className="text-xs font-medium text-emerald-900 mb-2">Generated HR update files</div>
+                  <div className="flex flex-wrap gap-1.5">
+                    {Object.entries(reconciliationExport.files).map(([name, meta]) => (
+                      <button key={name} onClick={() => handleDownloadResult(meta.file_id)} className="btn btn-secondary text-xs">
+                        {name} ({formatNumber(meta.records)})
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              <div className="overflow-x-auto border rounded-md">
+                <table className="data-table">
+                  <thead>
+                    <tr>
+                      <th>Status</th>
+                      <th>Issue</th>
+                      <th>Employee</th>
+                      <th>Field</th>
+                      <th>Old</th>
+                      <th>New</th>
+                      <th>Reason</th>
+                      <th>Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {visibleReconciliationIssues.map((issue) => (
+                      <tr key={issue.id}>
+                        <td>
+                          <span className={issue.status === 'approved' ? 'badge badge-green' : issue.status === 'open' ? 'badge badge-blue' : 'badge badge-gray'}>
+                            {issue.status}
+                          </span>
+                        </td>
+                        <td>
+                          <div className="font-medium text-slate-800">{issue.issue_type.replaceAll('_', ' ')}</div>
+                          <div className="text-[11px] text-slate-500">{Math.round((issue.confidence || 0) * 100)}% confidence</div>
+                        </td>
+                        <td>
+                          <div className="text-xs font-medium">{issue.employee_id || '-'}</div>
+                          {issue.employee_name && <div className="text-[11px] text-slate-500">{issue.employee_name}</div>}
+                        </td>
+                        <td>{issue.field || '-'}</td>
+                        <td>{issue.old_value ?? '-'}</td>
+                        <td>{issue.new_value ?? '-'}</td>
+                        <td>
+                          <div className="max-w-xs text-xs text-slate-600">{issue.explanation}</div>
+                          <div className="text-[11px] text-slate-400 mt-1">{issue.suggested_action}</div>
+                        </td>
+                        <td>
+                          <div className="flex flex-wrap gap-1">
+                            {issue.status !== 'approved' && (
+                              <button
+                                onClick={() => handleReconciliationAction(issue.id, 'approve')}
+                                disabled={reconciliationActionId === issue.id}
+                                className="btn btn-secondary text-[11px] px-2 py-1"
+                              >
+                                Approve
+                              </button>
+                            )}
+                            {issue.status !== 'rejected' && (
+                              <button
+                                onClick={() => handleReconciliationAction(issue.id, 'reject')}
+                                disabled={reconciliationActionId === issue.id}
+                                className="btn btn-secondary text-[11px] px-2 py-1"
+                              >
+                                Reject
+                              </button>
+                            )}
+                            {issue.status !== 'ignored' && (
+                              <button
+                                onClick={() => handleReconciliationAction(issue.id, 'ignore')}
+                                disabled={reconciliationActionId === issue.id}
+                                className="btn btn-secondary text-[11px] px-2 py-1"
+                              >
+                                Ignore
+                              </button>
+                            )}
+                            {issue.status !== 'open' && (
+                              <button
+                                onClick={() => handleReconciliationAction(issue.id, 'reopen')}
+                                disabled={reconciliationActionId === issue.id}
+                                className="btn btn-secondary text-[11px] px-2 py-1"
+                              >
+                                Reopen
+                              </button>
+                            )}
+                          </div>
+                        </td>
+                      </tr>
+                    ))}
+                    {visibleReconciliationIssues.length === 0 && (
+                      <tr>
+                        <td colSpan={8}>No reconciliation issues were generated.</td>
+                      </tr>
+                    )}
+                  </tbody>
+                </table>
+              </div>
+
+              {(reconciliationRun.issues || []).length > visibleReconciliationIssues.length && (
+                <p className="text-xs text-slate-500">
+                  Showing {formatNumber(visibleReconciliationIssues.length)} of {formatNumber(reconciliationRun.issues.length)} issues.
+                </p>
+              )}
             </div>
           )}
 

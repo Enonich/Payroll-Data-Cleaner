@@ -8,6 +8,7 @@ from pydantic import BaseModel
 from app.services.file_service import FileService
 from app.services.comparison_service import ComparisonService
 from app.services.template_service import TemplateService
+from app.services.reconciliation_service import ReconciliationService
 
 router = APIRouter()
 
@@ -280,6 +281,28 @@ async def compare_employee_data(request: EmployeeDataComparisonRequest):
                 "employees_only_in_file2.csv"
             )
 
+        reconciliation_payload = None
+        reconciliation_warning = None
+        try:
+            file1_info = FileService.get_file_info(request.file1_id) or {}
+            file2_info = FileService.get_file_info(request.file2_id) or {}
+            reconciliation_run = ReconciliationService.create_run_from_employee_data_result(
+                request.file1_id,
+                request.file2_id,
+                file1_info.get("filename", "File 1"),
+                file2_info.get("filename", "File 2"),
+                result,
+            )
+            reconciliation_payload = {
+                "id": reconciliation_run["id"],
+                "status_counts": reconciliation_run["status_counts"],
+                "type_counts": reconciliation_run["type_counts"],
+                "issue_count": len(reconciliation_run["issues"]),
+                "issues_preview": reconciliation_run["issues"][:20],
+            }
+        except Exception as reconciliation_error:
+            reconciliation_warning = str(reconciliation_error)
+
         return {
             "summary": {
                 "total_file1": result['total_file1'],
@@ -302,6 +325,8 @@ async def compare_employee_data(request: EmployeeDataComparisonRequest):
                 "only_in_file1": result['only_in_file1_preview'],
                 "only_in_file2": result['only_in_file2_preview'],
             },
+            "reconciliation_run": reconciliation_payload,
+            "reconciliation_warning": reconciliation_warning,
             "files_created": files_created,
             "preview_differences": result['mismatches_df'].head(50).to_dict('records')
             if len(result['mismatches_df']) > 0 else []

@@ -64,6 +64,60 @@ class DBService:
                     )
                     """
                 )
+                cur.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS reconciliation_runs (
+                        id TEXT PRIMARY KEY,
+                        source_file1_id TEXT NOT NULL,
+                        source_file2_id TEXT NOT NULL,
+                        file1_label TEXT NOT NULL,
+                        file2_label TEXT NOT NULL,
+                        summary_json TEXT NOT NULL,
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL
+                    )
+                    """
+                )
+                cur.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS reconciliation_issues (
+                        id TEXT PRIMARY KEY,
+                        run_id TEXT NOT NULL,
+                        issue_type TEXT NOT NULL,
+                        status TEXT NOT NULL,
+                        employee_id TEXT,
+                        employee_name TEXT,
+                        field TEXT,
+                        old_value TEXT,
+                        new_value TEXT,
+                        difference REAL,
+                        confidence REAL NOT NULL,
+                        suggested_action TEXT NOT NULL,
+                        explanation TEXT NOT NULL,
+                        source_json TEXT NOT NULL,
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL,
+                        FOREIGN KEY(run_id) REFERENCES reconciliation_runs(id)
+                    )
+                    """
+                )
+                cur.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS reconciliation_audit (
+                        id TEXT PRIMARY KEY,
+                        run_id TEXT NOT NULL,
+                        issue_id TEXT,
+                        action TEXT NOT NULL,
+                        actor TEXT NOT NULL,
+                        note TEXT,
+                        before_status TEXT,
+                        after_status TEXT,
+                        created_at TEXT NOT NULL,
+                        FOREIGN KEY(run_id) REFERENCES reconciliation_runs(id),
+                        FOREIGN KEY(issue_id) REFERENCES reconciliation_issues(id)
+                    )
+                    """
+                )
                 conn.commit()
                 cls._initialized = True
             finally:

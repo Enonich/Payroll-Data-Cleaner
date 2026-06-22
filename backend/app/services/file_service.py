@@ -8,6 +8,7 @@ from pathlib import Path
 from datetime import datetime
 from typing import Dict, List, Optional, Tuple
 import pandas as pd
+import numpy as np
 from app.config import UPLOAD_DIR, EXPORT_DIR, ALLOWED_EXTENSIONS, CSV_ENCODINGS
 
 
@@ -17,6 +18,36 @@ class FileService:
     # In-memory store for file metadata and dataframes
     _files: Dict[str, Dict] = {}
     _dataframes: Dict[str, pd.DataFrame] = {}
+
+    @staticmethod
+    def _json_safe_scalar(value):
+        if value is None:
+            return None
+        try:
+            if pd.isna(value):
+                return None
+        except (TypeError, ValueError):
+            pass
+        if isinstance(value, np.generic):
+            return value.item()
+        if isinstance(value, pd.Timestamp):
+            return value.isoformat()
+        if hasattr(value, 'isoformat'):
+            try:
+                return value.isoformat()
+            except (TypeError, ValueError):
+                pass
+        return value
+
+    @classmethod
+    def _json_safe_dataframe(cls, df: pd.DataFrame) -> pd.DataFrame:
+        if df is None or len(df) == 0:
+            return df
+        if hasattr(df, 'map'):
+            safe_df = df.map(cls._json_safe_scalar)
+        else:
+            safe_df = df.applymap(cls._json_safe_scalar)
+        return safe_df.astype(object).where(pd.notna(safe_df), None)
     
     @classmethod
     def read_file(cls, filepath: Path, filename: str) -> Tuple[pd.DataFrame, str]:
@@ -121,7 +152,7 @@ class FileService:
         if df is None:
             return None
         
-        preview_df = df.head(rows)
+        preview_df = cls._json_safe_dataframe(df.head(rows))
         return {
             'columns': df.columns.tolist(),
             'data': preview_df.to_dict(orient='records'),
@@ -142,6 +173,8 @@ class FileService:
         else:
             safe_limit = max(0, int(limit))
             data_df = df.iloc[safe_offset:safe_offset + safe_limit]
+
+        data_df = cls._json_safe_dataframe(data_df)
 
         return {
             'columns': df.columns.tolist(),
@@ -209,6 +242,7 @@ class FileService:
             'filename': filename,
             'filepath': None,
             'file_type': 'generated',
+            'is_generated': True,
             'encoding': 'utf-8',
             'size': 0,
             'columns': df.columns.tolist(),

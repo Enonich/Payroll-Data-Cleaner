@@ -81,6 +81,11 @@ class ApplyRowUpdatesRequest(BaseModel):
     updates: List[RowUpdateItem]
 
 
+class DeleteRowsRequest(BaseModel):
+    file_id: str
+    row_indices: List[int]
+
+
 class ReorderColumnsRequest(BaseModel):
     file_id: str
     column_order: List[str]
@@ -96,6 +101,13 @@ class AddFormulaColumnRequest(BaseModel):
     column_name: str
     formula: str
     overwrite_existing: bool = False
+
+
+class AddColumnRequest(BaseModel):
+    file_id: str
+    column_name: str
+    reference_column: Optional[str] = None
+    position: Literal["left", "right", "end"] = "end"
 
 
 def _normalize_name_for_match(value: Any) -> str:
@@ -244,8 +256,16 @@ async def enrich_ids_by_name(request: EnrichIdsByNameRequest):
         duplicate_reference_names = set()
 
         for _, row in reference_df[[request.reference_name_column, request.reference_id_column]].iterrows():
+            # Explicitly convert pandas/numpy values to Python scalars
             raw_name = row[request.reference_name_column]
             raw_id = row[request.reference_id_column]
+            
+            # Convert to native Python types
+            if hasattr(raw_name, 'item'):
+                raw_name = raw_name.item()
+            if hasattr(raw_id, 'item'):
+                raw_id = raw_id.item()
+            
             name_key = _normalize_name_for_match(raw_name)
             id_value = DataCleaningService.normalize_staff_id(raw_id)
 
@@ -271,8 +291,18 @@ async def enrich_ids_by_name(request: EnrichIdsByNameRequest):
         fuzzy_match_samples = []
 
         for row_index, row in result_df.iterrows():
-            name_key = _normalize_name_for_match(row[request.target_name_column])
-            existing_id = DataCleaningService.normalize_staff_id(row.get(request.output_id_column))
+            # Explicitly convert pandas/numpy values to Python scalars
+            raw_target_name = row[request.target_name_column]
+            raw_existing_id = row.get(request.output_id_column)
+            
+            # Convert to native Python types
+            if hasattr(raw_target_name, 'item'):
+                raw_target_name = raw_target_name.item()
+            if hasattr(raw_existing_id, 'item'):
+                raw_existing_id = raw_existing_id.item()
+            
+            name_key = _normalize_name_for_match(raw_target_name)
+            existing_id = DataCleaningService.normalize_staff_id(raw_existing_id)
 
             if not name_key:
                 unmatched += 1
@@ -304,7 +334,7 @@ async def enrich_ids_by_name(request: EnrichIdsByNameRequest):
                     fuzzy_matched += 1
                     if len(fuzzy_match_samples) < 15:
                         fuzzy_match_samples.append({
-                            "target_name": str(row[request.target_name_column]),
+                            "target_name": str(raw_target_name),
                             "matched_reference_name": best_name,
                             "score": round(float(best_score or 0.0), 4),
                         })
@@ -314,14 +344,14 @@ async def enrich_ids_by_name(request: EnrichIdsByNameRequest):
                 best_name, best_score = fuzzy_cache[name_key]
                 if len(unmatched_samples) < 15:
                     unmatched_samples.append({
-                        "target_name": str(row[request.target_name_column]),
+                        "target_name": str(raw_target_name),
                         "closest_reference_name": best_name,
                         "score": round(float(best_score or 0.0), 4),
                     })
             else:
                 unmatched += 1
                 if len(unmatched_samples) < 15:
-                    unmatched_samples.append(str(row[request.target_name_column]))
+                    unmatched_samples.append(str(raw_target_name))
                 continue
 
             unmatched += 1
@@ -394,6 +424,43 @@ async def apply_row_updates(request: ApplyRowUpdatesRequest):
             "message": "Row updates applied",
             "rows_touched": len(request.updates),
             "cells_updated": updated_cells,
+            "preview": preview,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/delete-rows")
+async def delete_rows(request: DeleteRowsRequest):
+    """
+    Delete specific rows by their integer index positions.
+    The dataframe is reset-indexed after deletion so future indices are stable.
+    """
+    df = FileService.get_dataframe(request.file_id)
+    if df is None:
+        raise HTTPException(status_code=404, detail="File not found")
+
+    if not request.row_indices:
+        raise HTTPException(status_code=400, detail="No row indices supplied")
+
+    out_of_range = [i for i in request.row_indices if i < 0 or i >= len(df)]
+    if out_of_range:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Row indices out of range: {out_of_range}"
+        )
+
+    try:
+        original_count = len(df)
+        result_df = df.drop(index=request.row_indices).reset_index(drop=True)
+        FileService.update_dataframe(request.file_id, result_df)
+        preview = FileService.get_preview(request.file_id, 50)
+        return {
+            "message": "Rows deleted",
+            "rows_deleted": original_count - len(result_df),
+            "remaining_rows": len(result_df),
             "preview": preview,
         }
     except HTTPException:
@@ -500,6 +567,52 @@ async def add_formula_column(request: AddFormulaColumnRequest):
             status_code=400,
             detail=f"Could not evaluate formula. Use [Column Name] for columns with spaces. Error: {str(e)}"
         )
+
+
+@router.post("/add-column")
+async def add_column(request: AddColumnRequest):
+    """
+    Add an empty column and place it to the left/right of a reference column.
+    """
+    df = FileService.get_dataframe(request.file_id)
+    if df is None:
+        raise HTTPException(status_code=404, detail="File not found")
+
+    column_name = (request.column_name or "").strip()
+    if not column_name:
+        raise HTTPException(status_code=400, detail="column_name is required")
+
+    if column_name in df.columns:
+        raise HTTPException(status_code=400, detail=f"Column '{column_name}' already exists")
+
+    try:
+        result_df = df.copy()
+
+        insert_at = len(result_df.columns)
+        if request.position in ("left", "right"):
+            if not request.reference_column:
+                raise HTTPException(status_code=400, detail="reference_column is required for left/right insert")
+            if request.reference_column not in result_df.columns:
+                raise HTTPException(status_code=400, detail=f"Column '{request.reference_column}' not found")
+
+            ref_idx = result_df.columns.get_loc(request.reference_column)
+            insert_at = ref_idx if request.position == "left" else ref_idx + 1
+
+        result_df.insert(insert_at, column_name, '')
+        FileService.update_dataframe(request.file_id, result_df)
+
+        return {
+            "message": "Column added",
+            "column_name": column_name,
+            "position": request.position,
+            "reference_column": request.reference_column,
+            "columns": result_df.columns.tolist(),
+            "preview": FileService.get_preview(request.file_id, 30),
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @router.get("/{file_id}/column-values/{column}")

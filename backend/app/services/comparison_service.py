@@ -40,7 +40,11 @@ class ComparisonService:
     def _json_safe_dataframe(cls, df: pd.DataFrame) -> pd.DataFrame:
         if df is None or len(df) == 0:
             return df
-        return df.applymap(cls._json_safe_scalar)
+        if hasattr(df, 'map'):
+            safe_df = df.map(cls._json_safe_scalar)
+        else:
+            safe_df = df.applymap(cls._json_safe_scalar)
+        return safe_df.astype(object).where(pd.notna(safe_df), None)
 
     @staticmethod
     def _sample_presence_rows(df: pd.DataFrame, id_col: str, name_col: Optional[str] = None,
