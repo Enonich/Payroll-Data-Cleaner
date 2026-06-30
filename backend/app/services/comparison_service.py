@@ -12,6 +12,118 @@ class ComparisonService:
     """Service for comparing payroll data between files"""
 
     @staticmethod
+    def _column_match_score(col1: str, col2: str) -> int:
+        def tokens(value: str) -> set:
+            normalized = ''.join(ch.lower() if ch.isalnum() else ' ' for ch in str(value))
+            return {token for token in normalized.split() if token}
+
+        tokens1 = tokens(col1)
+        tokens2 = tokens(col2)
+        joined1 = ''.join(tokens1)
+        joined2 = ''.join(tokens2)
+        score = 0
+
+        if joined1 == joined2:
+            score += 40
+        if tokens1 & tokens2:
+            score += 20 * len(tokens1 & tokens2)
+
+        preferred_groups = [
+            {'account', 'acct', 'accountno', 'accountnumber', 'number', 'no'},
+            {'ssnit', 'ssf', 'social', 'security'},
+            {'staff', 'employee', 'emp', 'id'},
+            {'tin', 'tax'},
+        ]
+        for group in preferred_groups:
+            if tokens1 & group and tokens2 & group:
+                score += 30
+
+        return score
+
+    @classmethod
+    def _valid_normalized_ids(cls, df: pd.DataFrame, column: str,
+                              normalize_ids: bool, keep_digits: int) -> set:
+        if df is None or column not in df.columns:
+            return set()
+        ids = set(cls._normalized_id_series(df[column], normalize_ids, keep_digits))
+        ids.discard('')
+        return ids
+
+    @staticmethod
+    def _keep_digits_for_pair(col1: str, col2: str, requested_keep_digits: int) -> int:
+        joined = f"{col1} {col2}".lower()
+        if any(token in joined for token in ("account", "acct", "ssnit", "ssf", "tin")):
+            return 0
+        return requested_keep_digits
+
+    @classmethod
+    def resolve_matching_columns(cls, df1: pd.DataFrame, df2: pd.DataFrame,
+                                 requested_id_col1: str, requested_id_col2: str,
+                                 normalize_ids: bool = True,
+                                 keep_digits: int = 5) -> Dict[str, Any]:
+        """
+        Use the requested ID columns when they produce matches; otherwise pick the
+        best overlapping identifier-like columns, such as Account Number or SSNIT.
+        """
+        requested_pair_keep_digits = cls._keep_digits_for_pair(
+            requested_id_col1,
+            requested_id_col2,
+            keep_digits,
+        )
+        requested_ids1 = cls._valid_normalized_ids(df1, requested_id_col1, normalize_ids, requested_pair_keep_digits)
+        requested_ids2 = cls._valid_normalized_ids(df2, requested_id_col2, normalize_ids, requested_pair_keep_digits)
+        requested_overlap = len(requested_ids1 & requested_ids2)
+
+        best = {
+            'id_col1': requested_id_col1,
+            'id_col2': requested_id_col2,
+            'valid_ids_file1': len(requested_ids1),
+            'valid_ids_file2': len(requested_ids2),
+            'overlap': requested_overlap,
+            'auto_selected': False,
+            'requested_id_col1': requested_id_col1,
+            'requested_id_col2': requested_id_col2,
+            'keep_digits': requested_pair_keep_digits,
+        }
+
+        # Respect the user's ID column choice whenever it produces any overlap.
+        if requested_overlap > 0:
+            return best
+
+        candidate_terms = ('id', 'staff', 'employee', 'emp', 'account', 'acct', 'ssnit', 'ssf', 'tin')
+        cols1 = [c for c in df1.columns if any(term in str(c).lower() for term in candidate_terms)]
+        cols2 = [c for c in df2.columns if any(term in str(c).lower() for term in candidate_terms)]
+
+        for col1 in cols1:
+            pair_keep_digits = cls._keep_digits_for_pair(col1, "", keep_digits)
+            ids1 = cls._valid_normalized_ids(df1, col1, normalize_ids, pair_keep_digits)
+            if not ids1:
+                continue
+            for col2 in cols2:
+                pair_keep_digits = cls._keep_digits_for_pair(col1, col2, keep_digits)
+                ids1 = cls._valid_normalized_ids(df1, col1, normalize_ids, pair_keep_digits)
+                ids2 = cls._valid_normalized_ids(df2, col2, normalize_ids, pair_keep_digits)
+                if not ids2:
+                    continue
+                overlap = len(ids1 & ids2)
+                if overlap == 0:
+                    continue
+                score = (overlap * 1000) + cls._column_match_score(col1, col2)
+                best_score = (best['overlap'] * 1000) + cls._column_match_score(best['id_col1'], best['id_col2'])
+                if score > best_score:
+                    best.update({
+                        'id_col1': col1,
+                        'id_col2': col2,
+                        'valid_ids_file1': len(ids1),
+                        'valid_ids_file2': len(ids2),
+                        'overlap': overlap,
+                        'auto_selected': col1 != requested_id_col1 or col2 != requested_id_col2,
+                        'keep_digits': pair_keep_digits,
+                    })
+
+        return best
+
+    @staticmethod
     def _normalize_matching_id(value: Any, normalize_ids: bool, keep_digits: int) -> str:
         cleaned = DataCleaningService.normalize_staff_id(value)
         if not cleaned:
@@ -148,13 +260,41 @@ class ComparisonService:
         if value_type == 'grade':
             return DataCleaningService.normalize_grade(value)
 
+        if value_type == 'name':
+            tokens = ComparisonService._name_tokens(value)
+            return ' '.join(sorted(tokens))
+
         text = str(value).strip()
         if value_type == 'case_sensitive':
             return text
         return ' '.join(text.upper().split())
 
     @staticmethod
+    def _name_tokens(value: Any) -> set:
+        if pd.isna(value):
+            return set()
+        text = str(value).upper()
+        cleaned = ''.join(ch if ch.isalnum() else ' ' for ch in text)
+        ignored = {'MR', 'MRS', 'MS', 'DR', 'PROF'}
+        return {token for token in cleaned.split() if token and token not in ignored}
+
+    @staticmethod
+    def _names_differ(value1: Any, value2: Any) -> bool:
+        tokens1 = ComparisonService._name_tokens(value1)
+        tokens2 = ComparisonService._name_tokens(value2)
+        if not tokens1 and not tokens2:
+            return False
+        if not tokens1 or not tokens2:
+            return True
+        overlap = len(tokens1 & tokens2)
+        similarity = overlap / max(len(tokens1), len(tokens2))
+        return similarity < 0.65
+
+    @staticmethod
     def _values_differ(value1: Any, value2: Any, value_type: str, tolerance: float) -> bool:
+        if value_type == 'name':
+            return ComparisonService._names_differ(value1, value2)
+
         normalized1 = ComparisonService._normalize_comparison_value(value1, value_type)
         normalized2 = ComparisonService._normalize_comparison_value(value2, value_type)
 

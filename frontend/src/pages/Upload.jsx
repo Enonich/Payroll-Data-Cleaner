@@ -57,13 +57,6 @@ export default function Upload() {
 
   return (
     <div className="space-y-5">
-      <div>
-        <h1 className="text-xl font-semibold text-slate-900">Upload Files</h1>
-        <p className="text-sm text-slate-500 mt-0.5">
-          Upload CSV or Excel files for processing
-        </p>
-      </div>
-
       <div className="card p-4">
         <FileUploader onUpload={handleUpload} multiple />
         {uploading && (

@@ -29,6 +29,7 @@
     /* Inter variable + OpenType features matching SF Pro feel */
     font-feature-settings: 'kern' 1, 'liga' 1, 'calt' 1, 'ss01' 1;
     font-variation-settings: 'opsz' 14;
+    overflow-x: hidden;
   }
 
   /* Headings: tight tracking like SF Pro Display */
@@ -74,6 +75,7 @@
     @apply w-full text-left;
     font-size: 0.8125rem;
     font-variation-settings: 'opsz' 12;
+    table-layout: fixed;
   }
   .data-table th {
     @apply px-3 py-2 border-b font-medium;
@@ -82,11 +84,16 @@
     font-size: 0.6875rem;
     letter-spacing: 0.05em;
     text-transform: uppercase;
+    overflow-wrap: anywhere;
+    word-break: break-word;
   }
   .data-table td {
     @apply px-3 py-2;
     border-bottom: 1px solid rgb(210 210 215 / 0.6);
     color: var(--color-text-primary);
+    overflow-wrap: anywhere;
+    word-break: break-word;
+    vertical-align: top;
   }
   .data-table tr:hover td {
     background-color: rgb(0 0 0 / 0.015);
@@ -154,6 +161,8 @@
   }
   .badge-blue  { background-color: #e8f0fd; color: #1352cc; }
   .badge-green { background-color: #e4f5ec; color: #1a7a3f; }
+  .badge-yellow { background-color: #fff4d6; color: #9a5b00; }
+  .badge-red { background-color: #ffe7e7; color: #b42318; }
   .badge-gray  {
     background-color: rgb(142 142 147 / 0.12);
     color: var(--color-text-secondary);

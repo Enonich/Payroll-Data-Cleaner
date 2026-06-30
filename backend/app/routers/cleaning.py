@@ -103,6 +103,14 @@ class AddFormulaColumnRequest(BaseModel):
     overwrite_existing: bool = False
 
 
+class FillSequenceRequest(BaseModel):
+    file_id: str
+    column_name: str
+    prefix: str
+    start_number: str
+    overwrite_existing: bool = False
+
+
 class AddColumnRequest(BaseModel):
     file_id: str
     column_name: str
@@ -163,13 +171,132 @@ def _build_eval_expression(formula: str, columns: List[str]) -> str:
     return expression
 
 
+def insert_spaces_between_strings(expression: str, string_cols: set) -> str:
+    # A regex to tokenize the expression.
+    # Tokens can be:
+    # - column references: `column_name`
+    # - operator: +
+    # - other operators/literals/spaces
+    pattern = r"(`[^`]+`|\+|'[^\']*'|\"[^\"]*\"|[^\+`'\"]+)"
+    tokens = re.findall(pattern, expression)
+    
+    new_tokens = []
+    i = 0
+    while i < len(tokens):
+        token = tokens[i]
+        stripped = token.strip()
+        
+        # If this token is a column reference and the next non-space token is '+'
+        # and the token after that is another column reference, and both are string columns:
+        if stripped.startswith('`') and stripped.endswith('`'):
+            col_name = stripped[1:-1]
+            if col_name in string_cols:
+                # Look ahead for '+'
+                next_plus_idx = -1
+                next_col_idx = -1
+                
+                # find next non-empty token
+                for j in range(i + 1, len(tokens)):
+                    t_strip = tokens[j].strip()
+                    if not t_strip:
+                        continue
+                    if t_strip == '+':
+                        next_plus_idx = j
+                        # Now look for the next column token after '+'
+                        for k in range(j + 1, len(tokens)):
+                            tk_strip = tokens[k].strip()
+                            if not tk_strip:
+                                continue
+                            if tk_strip.startswith('`') and tk_strip.endswith('`'):
+                                next_col_name = tk_strip[1:-1]
+                                if next_col_name in string_cols:
+                                    next_col_idx = k
+                                break
+                            else:
+                                break
+                        break
+                    else:
+                        break
+                
+                if next_plus_idx != -1 and next_col_idx != -1:
+                    new_tokens.append(token)
+                    for m in range(i + 1, next_plus_idx):
+                        new_tokens.append(tokens[m])
+                    new_tokens.append("+ ' ' +")
+                    i = next_plus_idx + 1
+                    continue
+        
+        new_tokens.append(token)
+        i += 1
+        
+    return "".join(new_tokens)
+
+
 def _compute_formula_series(df, expression: str):
+    import pandas as pd
     referenced_cols = set(re.findall(r"`([^`]+)`", expression))
     eval_df = df.copy()
+    
+    numeric_cols = set()
+    string_cols = set()
+    
     for col in referenced_cols:
         if col in eval_df.columns:
-            eval_df[col] = eval_df[col].apply(DataCleaningService.clean_currency_value)
-    return eval_df.eval(expression, engine="python")
+            series = eval_df[col]
+            non_nulls = series.dropna()
+            is_num = False
+            if len(non_nulls) > 0:
+                if pd.api.types.is_numeric_dtype(series):
+                    is_num = True
+                else:
+                    count_numeric = 0
+                    count_to_check = min(len(non_nulls), 100)
+                    for val in non_nulls.head(count_to_check):
+                        val_str = str(val).strip()
+                        if val_str in ('-', '', ' -   '):
+                            count_numeric += 1
+                            continue
+                        val_str = val_str.replace(',', '').replace('"', '').replace('GH₵', '').replace('GHȼ', '')
+                        try:
+                            float(val_str)
+                            count_numeric += 1
+                        except ValueError:
+                            pass
+                    is_num = (count_numeric / count_to_check) >= 0.8
+            
+            if is_num:
+                numeric_cols.add(col)
+                eval_df[col] = eval_df[col].apply(DataCleaningService.clean_currency_value)
+            else:
+                string_cols.add(col)
+                eval_df[col] = eval_df[col].fillna("").astype(str).str.strip()
+
+    # Preprocess the expression to insert spaces between concatenated string columns
+    expression = insert_spaces_between_strings(expression, string_cols)
+
+    # Map backticked columns to temporary safe Python identifiers to evaluate using built-in eval()
+    col_to_id = {}
+    local_vars = {}
+    temp_expression = expression
+    
+    for idx, col in enumerate(referenced_cols):
+        col_id = f"__col_{idx}"
+        col_to_id[col] = col_id
+        if col in eval_df.columns:
+            local_vars[col_id] = eval_df[col]
+        else:
+            local_vars[col_id] = 0
+            
+        temp_expression = temp_expression.replace(f"`{col}`", col_id)
+
+    # Evaluate using native python eval
+    result = eval(temp_expression, {"__builtins__": None}, local_vars)
+    
+    # If the result is string/object type, clean up multiple spaces
+    if pd.api.types.is_object_dtype(result) or pd.api.types.is_string_dtype(result):
+        result = result.fillna("").astype(str).str.replace(r'\s+', ' ', regex=True).str.strip()
+        
+    return result
 
 
 @router.post("/apply-operations")
@@ -567,6 +694,74 @@ async def add_formula_column(request: AddFormulaColumnRequest):
             status_code=400,
             detail=f"Could not evaluate formula. Use [Column Name] for columns with spaces. Error: {str(e)}"
         )
+
+
+@router.post("/fill-sequence")
+async def fill_sequence(request: FillSequenceRequest):
+    """
+    Populate a column with a sequential ID (prefix + auto-incrementing number).
+    """
+    df = FileService.get_dataframe(request.file_id)
+    if df is None:
+        raise HTTPException(status_code=404, detail="File not found")
+
+    column_name = (request.column_name or "").strip()
+    if not column_name:
+        raise HTTPException(status_code=400, detail="column_name is required")
+
+    if column_name in df.columns and not request.overwrite_existing:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Column '{column_name}' already exists. Enable overwrite_existing to replace it."
+        )
+
+    try:
+        prefix = request.prefix or ""
+        start_str = request.start_number.strip()
+        
+        # Determine starting number and padding width
+        if start_str.isdigit():
+            start_val = int(start_str)
+            width = len(start_str)
+        else:
+            # extract trailing numeric part
+            match = re.search(r'(\d+)$', start_str)
+            if match:
+                num_str = match.group(1)
+                start_val = int(num_str)
+                width = len(num_str)
+                # prepend the non-numeric part of start_str to prefix
+                prefix = prefix + start_str[:-width]
+            else:
+                raise HTTPException(
+                    status_code=400,
+                    detail="First Employee ID must contain a numeric component at the end (e.g. '001', '1001')"
+                )
+
+        # Generate sequence values
+        num_rows = len(df)
+        seq_values = []
+        for i in range(num_rows):
+            current_num = start_val + i
+            num_part = f"{current_num:0{width}d}"
+            seq_values.append(f"{prefix}{num_part}")
+
+        result_df = df.copy()
+        result_df[column_name] = seq_values
+
+        FileService.update_dataframe(request.file_id, result_df)
+        return {
+            "message": "Sequence populated successfully",
+            "column_name": column_name,
+            "prefix": request.prefix,
+            "start_number": request.start_number,
+            "columns": result_df.columns.tolist(),
+            "preview": FileService.get_preview(request.file_id, 30),
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @router.post("/add-column")

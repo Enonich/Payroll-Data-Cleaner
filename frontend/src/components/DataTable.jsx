@@ -8,7 +8,7 @@ import {
 } from '@tanstack/react-table';
 import { ChevronLeft, ChevronRight, ChevronsLeft, ChevronsRight } from 'lucide-react';
 
-export default function DataTable({ data, columns: columnDefs }) {
+export default function DataTable({ data, columns: columnDefs, allowHorizontalScroll = false }) {
   const columns = useMemo(() => {
     if (columnDefs) return columnDefs;
     
@@ -53,7 +53,7 @@ export default function DataTable({ data, columns: columnDefs }) {
 
   return (
     <div className="space-y-3">
-      <div className="overflow-x-auto border border-slate-200 rounded-lg">
+      <div className={`${allowHorizontalScroll ? 'overflow-x-auto' : 'overflow-hidden'} border border-slate-200 rounded-lg`}>
         <table className="data-table">
           <thead>
             {table.getHeaderGroups().map((headerGroup) => (
@@ -61,10 +61,10 @@ export default function DataTable({ data, columns: columnDefs }) {
                 {headerGroup.headers.map((header) => (
                   <th
                     key={header.id}
-                    className="whitespace-nowrap cursor-pointer hover:bg-slate-100"
+                    className="cursor-pointer hover:bg-slate-100"
                     onClick={header.column.getToggleSortingHandler()}
                   >
-                    <span className="flex items-center gap-1">
+                    <span className="flex min-w-0 items-center gap-1">
                       {flexRender(
                         header.column.columnDef.header,
                         header.getContext()
@@ -83,7 +83,7 @@ export default function DataTable({ data, columns: columnDefs }) {
             {table.getRowModel().rows.map((row) => (
               <tr key={row.id}>
                 {row.getVisibleCells().map((cell) => (
-                  <td key={cell.id} className="whitespace-nowrap">
+                  <td key={cell.id}>
                     {flexRender(cell.column.columnDef.cell, cell.getContext())}
                   </td>
                 ))}
@@ -94,7 +94,7 @@ export default function DataTable({ data, columns: columnDefs }) {
       </div>
 
       {/* Pagination */}
-      <div className="flex items-center justify-between text-sm">
+      <div className="flex flex-wrap items-center justify-between gap-2 text-sm">
         <div className="text-slate-500">
           {table.getState().pagination.pageIndex * table.getState().pagination.pageSize + 1}-
           {Math.min(

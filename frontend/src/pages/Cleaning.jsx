@@ -16,6 +16,7 @@ import {
   deleteColumn,
   addFormulaColumn,
   addColumn,
+  fillSequence,
 } from '../services/api';
 
 import {
@@ -38,6 +39,7 @@ import {
   Columns2,
   CheckSquare,
 } from 'lucide-react';
+import FormField, { FieldTooltip } from '../components/FormField';
 
 const OPERATIONS = [
   { value: 'normalize_staff_id', label: 'Normalize Staff ID', icon: Hash, color: 'bg-blue-100 text-blue-700' },
@@ -118,6 +120,15 @@ export default function Cleaning() {
   const [formulaExpression, setFormulaExpression] = useState('');
   const [formulaOverwrite, setFormulaOverwrite] = useState(false);
   const [addingFormula, setAddingFormula] = useState(false);
+
+  // Sequence Autofill ID
+  const [sequenceTargetMode, setSequenceTargetMode] = useState('existing'); // existing | new
+  const [sequenceTargetColumn, setSequenceTargetColumn] = useState('');
+  const [sequenceNewColumnName, setSequenceNewColumnName] = useState('');
+  const [sequencePrefix, setSequencePrefix] = useState('');
+  const [sequenceStartNumber, setSequenceStartNumber] = useState('');
+  const [sequenceOverwrite, setSequenceOverwrite] = useState(false);
+  const [fillingSequence, setFillingSequence] = useState(false);
 
   // Dragging columns
   const [dragFrom, setDragFrom] = useState(null);
@@ -472,6 +483,34 @@ export default function Cleaning() {
     setFormulaExpression(prev => !prev ? token : `${prev} ${token}`);
   };
 
+  const handleFillSequence = async () => {
+    const colName = sequenceTargetMode === 'new' ? sequenceNewColumnName.trim() : sequenceTargetColumn;
+    if (!selectedFile || !colName) {
+      toast.error('Please select or specify a target column');
+      return;
+    }
+    if (!sequenceStartNumber.trim()) {
+      toast.error('Please specify a starting employee ID number');
+      return;
+    }
+    setFillingSequence(true);
+    try {
+      await fillSequence({
+        file_id: selectedFile,
+        column_name: colName,
+        prefix: sequencePrefix,
+        start_number: sequenceStartNumber.trim(),
+        overwrite_existing: sequenceOverwrite,
+      });
+      toast.success('Sequence populated successfully');
+      loadFileData(selectedFile);
+    } catch (e) {
+      toast.error(e.response?.data?.detail || 'Failed to populate sequence');
+    } finally {
+      setFillingSequence(false);
+    }
+  };
+
   const columns = preview?.columns || [];
   const opLabel = (val) => OPERATIONS.find(o => o.value === val)?.label || val;
   const opIcon = (val) => {
@@ -747,6 +786,7 @@ export default function Cleaning() {
             {[
               { id: 'enrich', label: 'ID Match' },
               { id: 'formula', label: 'Formula' },
+              { id: 'sequence', label: 'Autofill ID' },
             ].map(tab => (
               <button key={tab.id}
                       onClick={() => setPanelTab(tab.id)}
@@ -764,48 +804,98 @@ export default function Cleaning() {
             {/* ── ID Match tab ── */}
             {panelTab === 'enrich' && (
               <>
-                <p className="text-[11px] text-slate-500">Match names to ID column from a reference file.</p>
-                <select value={referenceFileId} onChange={(e) => setReferenceFileId(e.target.value)} className="input text-xs">
-                  <option value="">Reference file…</option>
-                  {files.filter(f => f.id !== selectedFile).map(f => (
-                    <option key={f.id} value={f.id}>{f.filename}</option>
-                  ))}
-                </select>
-                <div className="grid grid-cols-2 gap-1.5">
+                <p className="text-[11px] text-slate-500 leading-5">
+                  Fill missing staff IDs by matching employee names in this file against a reference file that already has names and IDs.
+                </p>
+
+                <FormField
+                  label="Reference file"
+                  tooltip="The lookup file that already contains correct employee names and their staff IDs."
+                  tooltipPlacement="right"
+                >
+                  <select value={referenceFileId} onChange={(e) => setReferenceFileId(e.target.value)} className="input text-xs">
+                    <option value="">Select reference file...</option>
+                    {files.filter(f => f.id !== selectedFile).map(f => (
+                      <option key={f.id} value={f.id}>{f.filename}</option>
+                    ))}
+                  </select>
+                </FormField>
+
+                <FormField
+                  label="Name column in current file"
+                  tooltip="Employee names in the file you are cleaning. Each row is matched against names in the reference file."
+                  tooltipPlacement="right"
+                >
                   <select value={targetNameColumn} onChange={(e) => setTargetNameColumn(e.target.value)} className="input text-xs">
-                    <option value="">Target name…</option>
+                    <option value="">Select name column...</option>
                     {columns.map(col => <option key={col} value={col}>{col}</option>)}
                   </select>
+                </FormField>
+
+                <FormField
+                  label="Output ID column"
+                  tooltip="Where matched staff IDs are written. This column is created automatically if it does not exist yet."
+                  tooltipPlacement="right"
+                >
                   <input className="input text-xs" value={outputIdColumn}
-                         onChange={(e) => setOutputIdColumn(e.target.value)} placeholder="Output column" />
-                </div>
-                <div className="grid grid-cols-2 gap-1.5">
+                         onChange={(e) => setOutputIdColumn(e.target.value)} placeholder="e.g. Staff ID" />
+                </FormField>
+
+                <FormField
+                  label="Name column in reference file"
+                  tooltip="The name column in the reference file that corresponds to names in your current file."
+                  tooltipPlacement="right"
+                >
                   <select value={referenceNameColumn} onChange={(e) => setReferenceNameColumn(e.target.value)} className="input text-xs">
-                    <option value="">Ref name…</option>
+                    <option value="">Select reference name column...</option>
                     {referenceColumns.map(col => <option key={col} value={col}>{col}</option>)}
                   </select>
+                </FormField>
+
+                <FormField
+                  label="ID column in reference file"
+                  tooltip="The staff ID copied into the output column whenever a name match is found."
+                  tooltipPlacement="right"
+                >
                   <select value={referenceIdColumn} onChange={(e) => setReferenceIdColumn(e.target.value)} className="input text-xs">
-                    <option value="">Ref ID…</option>
+                    <option value="">Select reference ID column...</option>
                     {referenceColumns.map(col => <option key={col} value={col}>{col}</option>)}
                   </select>
-                </div>
-                <label className="flex items-center gap-1.5 text-[11px] text-slate-600 cursor-pointer">
+                </FormField>
+
+                <label className="flex items-center gap-1.5 text-[11px] text-slate-700 cursor-pointer">
                   <input type="checkbox" checked={overwriteExistingIds}
                          onChange={(e) => setOverwriteExistingIds(e.target.checked)} className="w-3 h-3" />
-                  Overwrite existing IDs
+                  <span className="font-medium">Overwrite existing IDs</span>
+                  <FieldTooltip
+                    label="Overwrite existing IDs"
+                    text="Replace IDs that are already present in the output column. Leave unchecked to only fill empty cells."
+                    placement="right"
+                  />
                 </label>
-                <label className="flex items-center gap-1.5 text-[11px] text-slate-600 cursor-pointer">
+                <label className="flex items-center gap-1.5 text-[11px] text-slate-700 cursor-pointer">
                   <input type="checkbox" checked={useFuzzyMatching}
                          onChange={(e) => setUseFuzzyMatching(e.target.checked)} className="w-3 h-3" />
-                  Fuzzy matching
+                  <span className="font-medium">Fuzzy name matching</span>
+                  <FieldTooltip
+                    label="Fuzzy name matching"
+                    text="Allows near-matches when names differ slightly in spelling, order, or formatting."
+                    placement="right"
+                  />
                 </label>
                 {useFuzzyMatching && (
-                  <input className="input text-xs" value={fuzzyThreshold}
-                         onChange={(e) => setFuzzyThreshold(e.target.value)} placeholder="Threshold (0.88)" />
+                  <FormField
+                    label="Match threshold"
+                    tooltip="Value from 0 to 1. Higher values require closer name matches; lower values allow more variation."
+                    tooltipPlacement="right"
+                  >
+                    <input className="input text-xs" value={fuzzyThreshold}
+                           onChange={(e) => setFuzzyThreshold(e.target.value)} placeholder="0.88" />
+                  </FormField>
                 )}
                 <button onClick={handleEnrichIds} disabled={joiningIds}
                         className="btn btn-primary w-full text-xs justify-center disabled:opacity-40">
-                  {joiningIds ? 'Matching…' : 'Create/Update ID Column'}
+                  {joiningIds ? 'Matching…' : 'Fill IDs from Reference File'}
                 </button>
                 {idJoinResult?.stats && (
                   <div className="text-[11px] text-slate-600 space-y-0.5 bg-slate-50 rounded p-2">
@@ -841,6 +931,61 @@ export default function Cleaning() {
                 <button onClick={handleAddFormulaColumn} disabled={addingFormula}
                         className="btn btn-primary w-full text-xs justify-center disabled:opacity-40">
                   {addingFormula ? 'Adding…' : 'Add Formula Column'}
+                </button>
+              </>
+            )}
+
+            {/* ── Sequence Autofill tab ── */}
+            {panelTab === 'sequence' && (
+              <>
+                <p className="text-[11px] text-slate-500">Populate a column with a sequential staff ID (e.g., fixed prefix + auto-incrementing employee number).</p>
+                <div className="flex gap-2">
+                  <label className="flex items-center gap-1 text-[11px] text-slate-600 cursor-pointer">
+                    <input type="radio" name="sequenceTargetMode" value="existing"
+                           checked={sequenceTargetMode === 'existing'} onChange={() => setSequenceTargetMode('existing')} className="w-3 h-3" />
+                    Existing column
+                  </label>
+                  <label className="flex items-center gap-1 text-[11px] text-slate-600 cursor-pointer">
+                    <input type="radio" name="sequenceTargetMode" value="new"
+                           checked={sequenceTargetMode === 'new'} onChange={() => setSequenceTargetMode('new')} className="w-3 h-3" />
+                    New column
+                  </label>
+                </div>
+
+                {sequenceTargetMode === 'existing' ? (
+                  <select value={sequenceTargetColumn} onChange={(e) => setSequenceTargetColumn(e.target.value)} className="input text-xs">
+                    <option value="">Select column to fill…</option>
+                    {columns.map(col => (
+                      <option key={col} value={col}>{col}</option>
+                    ))}
+                  </select>
+                ) : (
+                  <input className="input text-xs" value={sequenceNewColumnName}
+                         onChange={(e) => setSequenceNewColumnName(e.target.value)} placeholder="New column name" />
+                )}
+
+                <div className="grid grid-cols-2 gap-1.5">
+                  <div>
+                    <label className="block text-[10px] font-medium text-slate-500 mb-0.5">Fixed Prefix</label>
+                    <input className="input text-xs" value={sequencePrefix}
+                           onChange={(e) => setSequencePrefix(e.target.value)} placeholder="e.g. EMP-" />
+                  </div>
+                  <div>
+                    <label className="block text-[10px] font-medium text-slate-500 mb-0.5">First Employee ID</label>
+                    <input className="input text-xs" value={sequenceStartNumber}
+                           onChange={(e) => setSequenceStartNumber(e.target.value)} placeholder="e.g. 001" />
+                  </div>
+                </div>
+
+                <label className="flex items-center gap-1.5 text-[11px] text-slate-600 cursor-pointer">
+                  <input type="checkbox" checked={sequenceOverwrite}
+                         onChange={(e) => setSequenceOverwrite(e.target.checked)} className="w-3 h-3" />
+                  Overwrite if exists
+                </label>
+
+                <button onClick={handleFillSequence} disabled={fillingSequence}
+                        className="btn btn-primary w-full text-xs justify-center disabled:opacity-40">
+                  {fillingSequence ? 'Generating…' : 'Autofill Column'}
                 </button>
               </>
             )}

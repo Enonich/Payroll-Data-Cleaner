@@ -146,13 +146,6 @@ export default function Dashboard() {
 
   return (
     <div className="space-y-5">
-      <div>
-        <h1 className="text-xl font-semibold text-slate-900">Dashboard</h1>
-        <p className="text-sm text-slate-500 mt-0.5">
-          Payroll Data Cleaning Application
-        </p>
-      </div>
-
       {/* Quick Actions */}
       <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
         {quickActions.map((action) => {

@@ -88,6 +88,10 @@ source venv/bin/activate
 # Install dependencies
 pip install -r requirements.txt
 
+# Optional local AI comparison report
+# Install/start Ollama separately, then pull the configured model:
+ollama pull gemma4:e2b
+
 # Run the server
 uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 ```
@@ -95,6 +99,8 @@ uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 The API will be available at http://localhost:8000
 - API Documentation: http://localhost:8000/docs
 - Alternative docs: http://localhost:8000/redoc
+
+The employee-data comparison endpoint uses `langchain-ollama` for a local AI inconsistency report when Ollama is available. Configure it with `OLLAMA_MODEL` and `OLLAMA_BASE_URL`; defaults are `gemma4:e2b` and `http://localhost:11434`.
 
 ### Frontend Setup
 

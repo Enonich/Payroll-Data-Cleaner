@@ -157,6 +157,11 @@ export const addFormulaColumn = async (options) => {
   return response.data;
 };
 
+export const fillSequence = async (options) => {
+  const response = await api.post('/cleaning/fill-sequence', options);
+  return response.data;
+};
+
 export const addColumn = async (fileId, columnName, referenceColumn = null, position = 'end') => {
   const response = await api.post('/cleaning/add-column', {
     file_id: fileId,

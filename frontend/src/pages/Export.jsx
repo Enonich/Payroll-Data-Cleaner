@@ -61,13 +61,6 @@ export default function Export() {
 
   return (
     <div className="space-y-4">
-      <div>
-        <h1 className="text-xl font-semibold text-slate-900">Export</h1>
-        <p className="text-sm text-slate-500 mt-0.5">
-          Download processed files
-        </p>
-      </div>
-
       {/* File Selection */}
       <div className="card p-4">
         <label className="block text-xs font-medium text-slate-600 mb-1.5">
@@ -148,8 +141,8 @@ export default function Export() {
               {Object.keys(stats.statistics).length > 0 && (
                 <div>
                   <h3 className="text-xs font-medium text-slate-600 mb-2">Column Stats</h3>
-                  <div className="overflow-x-auto border border-slate-200 rounded-md">
-                    <table className="w-full text-sm">
+                  <div className="overflow-hidden border border-slate-200 rounded-md">
+                    <table className="data-table">
                       <thead>
                         <tr className="bg-slate-50">
                           <th className="px-3 py-1.5 text-left text-xs font-medium text-slate-600 uppercase tracking-wide">Column</th>

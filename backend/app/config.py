@@ -23,3 +23,7 @@ ALLOWED_EXTENSIONS = {'.csv', '.xlsx', '.xls'}
 
 # CSV encodings to try
 CSV_ENCODINGS = ['utf-8', 'latin-1', 'cp1252', 'iso-8859-1']
+
+# Local AI audit settings
+OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "gemma4:e2b")
+OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")

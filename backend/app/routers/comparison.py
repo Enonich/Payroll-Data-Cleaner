@@ -3,14 +3,83 @@ Comparison router - handles payroll comparison endpoints
 """
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import JSONResponse
-from typing import List, Optional, Dict
+from typing import List, Optional, Dict, Any
 from pydantic import BaseModel
 from app.services.file_service import FileService
 from app.services.comparison_service import ComparisonService
+from app.services.ai_comparison_service import AIComparisonService
 from app.services.template_service import TemplateService
 from app.services.reconciliation_service import ReconciliationService
 
 router = APIRouter()
+
+
+def _normalized_column_name(column: str) -> str:
+    return ''.join(ch.lower() if ch.isalnum() else ' ' for ch in str(column)).strip()
+
+
+def _find_column_by_aliases(df, aliases: List[str]) -> Optional[str]:
+    normalized = {
+        ' '.join(_normalized_column_name(col).split()): col
+        for col in df.columns
+    }
+    compact = {
+        key.replace(' ', ''): col
+        for key, col in normalized.items()
+    }
+    for alias in aliases:
+        key = ' '.join(_normalized_column_name(alias).split())
+        if key in normalized:
+            return normalized[key]
+        if key.replace(' ', '') in compact:
+            return compact[key.replace(' ', '')]
+    return None
+
+
+def _resolve_name_column(df, selected_column: Optional[str], side: str) -> Optional[str]:
+    if selected_column and selected_column in df.columns:
+        return selected_column
+
+    full_name = _find_column_by_aliases(df, ["name of employee", "employee name", "full name", "name"])
+    if full_name:
+        return full_name
+
+    first = _find_column_by_aliases(df, ["firstname", "first name"])
+    surname = _find_column_by_aliases(df, ["surname", "last name"])
+    other = _find_column_by_aliases(df, ["other name", "middle name"])
+    if first and surname:
+        derived = f"_comparison_full_name_{side}"
+        parts = [first]
+        if other:
+            parts.append(other)
+        parts.append(surname)
+        df[derived] = df[parts].fillna("").astype(str).agg(" ".join, axis=1).str.strip()
+        return derived
+
+    return None
+
+
+def _ensure_name_mapping(
+    column_mappings: List[Dict[str, Any]],
+    name_col1: Optional[str],
+    name_col2: Optional[str],
+) -> List[Dict[str, Any]]:
+    mappings = [mapping.copy() for mapping in column_mappings]
+    if not name_col1 or not name_col2:
+        return mappings
+    has_name_mapping = any(
+        str(mapping.get("label") or mapping.get("field") or "").strip().lower() == "name"
+        or mapping.get("type") == "name"
+        for mapping in mappings
+    )
+    if not has_name_mapping:
+        mappings.insert(0, {
+            "file1": name_col1,
+            "file2": name_col2,
+            "label": "Name",
+            "type": "name",
+        })
+    return mappings
 
 
 class SalaryComparisonRequest(BaseModel):
@@ -56,6 +125,7 @@ class EmployeeDataComparisonRequest(BaseModel):
     normalize_ids: bool = True
     keep_digits: int = 5
     tolerance: float = 0.01
+    use_ai: bool = True
 
 
 class AllowanceDeductionRequest(BaseModel):
@@ -255,14 +325,37 @@ async def compare_employee_data(request: EmployeeDataComparisonRequest):
         raise HTTPException(status_code=400, detail="At least one column mapping is required")
 
     try:
-        result = ComparisonService.compare_employee_data(
-            df1, df2,
-            request.id_col1, request.id_col2,
+        df1_compare = df1.copy()
+        df2_compare = df2.copy()
+        resolved_name_col1 = _resolve_name_column(df1_compare, request.name_col1, "file1")
+        resolved_name_col2 = _resolve_name_column(df2_compare, request.name_col2, "file2")
+        effective_mappings = _ensure_name_mapping(
             request.column_mappings,
-            request.name_col1, request.name_col2,
-            request.normalize_ids, request.keep_digits,
+            resolved_name_col1,
+            resolved_name_col2,
+        )
+
+        matching_columns = ComparisonService.resolve_matching_columns(
+            df1_compare,
+            df2_compare,
+            request.id_col1,
+            request.id_col2,
+            request.normalize_ids,
+            request.keep_digits,
+        )
+
+        result = ComparisonService.compare_employee_data(
+            df1_compare, df2_compare,
+            matching_columns["id_col1"], matching_columns["id_col2"],
+            effective_mappings,
+            resolved_name_col1, resolved_name_col2,
+            request.normalize_ids, matching_columns.get("keep_digits", request.keep_digits),
             request.tolerance
         )
+
+        ai_audit = None
+        if request.use_ai:
+            ai_audit = AIComparisonService.generate_audit(result)
 
         files_created = {}
         if len(result['mismatches_df']) > 0:
@@ -321,12 +414,19 @@ async def compare_employee_data(request: EmployeeDataComparisonRequest):
                 "file2": result['duplicate_id_samples_file2'],
             },
             "analytics": result['analytics'],
+            "matching_columns": matching_columns,
+            "name_columns": {
+                "file1": resolved_name_col1,
+                "file2": resolved_name_col2,
+                "auto_mapped": bool(resolved_name_col1 and resolved_name_col2),
+            },
             "presence_preview": {
                 "only_in_file1": result['only_in_file1_preview'],
                 "only_in_file2": result['only_in_file2_preview'],
             },
             "reconciliation_run": reconciliation_payload,
             "reconciliation_warning": reconciliation_warning,
+            "ai_audit": ai_audit,
             "files_created": files_created,
             "preview_differences": result['mismatches_df'].head(50).to_dict('records')
             if len(result['mismatches_df']) > 0 else []

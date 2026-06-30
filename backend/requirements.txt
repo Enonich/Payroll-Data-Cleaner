@@ -9,3 +9,6 @@ lxml
 python-dotenv
 pydantic
 aiofiles
+ollama
+langchain-ollama
+langchain-core
