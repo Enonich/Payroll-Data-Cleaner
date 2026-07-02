@@ -3,7 +3,7 @@ Payroll Data Cleaning Application - FastAPI Backend
 """
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from app.routers import upload, cleaning, comparison, export, jobs, reconciliation
+from app.routers import upload, cleaning, comparison, export, jobs, reconciliation, column_definitions
 
 app = FastAPI(
     title="Payroll Data Cleaning API",
@@ -27,6 +27,7 @@ app.include_router(comparison.router, prefix="/api/comparison", tags=["Compariso
 app.include_router(export.router, prefix="/api/export", tags=["Export"])
 app.include_router(jobs.router, prefix="/api/jobs", tags=["Jobs"])
 app.include_router(reconciliation.router, prefix="/api/reconciliation", tags=["Reconciliation"])
+app.include_router(column_definitions.router, prefix="/api/column-definitions", tags=["Column Definitions"])
 
 
 @app.get("/")

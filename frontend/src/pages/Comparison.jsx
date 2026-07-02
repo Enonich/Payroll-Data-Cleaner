@@ -8,8 +8,12 @@ import {
   compareEmployeeData,
   getReconciliationRun,
   applyReconciliationAction,
+  applyBulkReconciliationAction,
   exportApprovedReconciliationUpdates,
   downloadCsv,
+  getColumnDefinitions,
+  addColumnDefinitionEntry,
+  replaceColumnDefinitions,
 } from '../services/api';
 
 const PAYROLL_FIELD_CATALOG = [
@@ -128,12 +132,12 @@ function createEmptyMapping() {
 }
 
 // type: 'full' | 'allowances' | 'deductions'
-function inferPayrollMappingsForType(columns1, columns2, type = 'full') {
+function inferPayrollMappingsForType(columns1, columns2, type = 'full', catalog = PAYROLL_FIELD_CATALOG) {
   const used1 = new Set();
   const used2 = new Set();
   const mappings = [];
 
-  const catalog = PAYROLL_FIELD_CATALOG.filter(field => {
+  const filtered = catalog.filter(field => {
     if (field.label === 'Name') return false;
     if (type === 'full')        return field.category !== 'identity';
     if (type === 'allowances')  return field.category === 'earnings' || field.category === 'allowances';
@@ -141,16 +145,69 @@ function inferPayrollMappingsForType(columns1, columns2, type = 'full') {
     return false;
   });
 
-  for (const field of catalog) {
+  for (const field of filtered) {
     const col1 = findBestColumn(columns1, field.aliases, used1);
     const col2 = findBestColumn(columns2, field.aliases, used2);
     if (col1 && col2) {
       used1.add(col1);
       used2.add(col2);
-      mappings.push({ file1: col1, file2: col2, label: field.label, type: field.type });
+      mappings.push({ file1: col1, file2: col2, label: field.label, type: field.type, category: field.category });
     }
   }
   return mappings;
+}
+
+// Merge API-loaded column definition entries with the base catalog.
+// API entries whose label already exists in the base catalog are skipped.
+function buildMergedCatalog(apiEntries) {
+  const base = PAYROLL_FIELD_CATALOG;
+  const baseLabels = new Set(base.map(e => e.label.toLowerCase()));
+  const extras = (apiEntries || [])
+    .filter(e => !baseLabels.has((e.label || '').toLowerCase()))
+    .map(e => ({
+      label:    e.label,
+      aliases:  Array.isArray(e.aliases) ? e.aliases : [],
+      type:     e.type || 'currency',
+      category: e.category || 'allowances',
+    }));
+  return [...base, ...extras];
+}
+
+// Find columns in both files that were NOT matched by any catalog entry.
+// Returns array of { col1, col2, label, category } objects ready for the user to classify.
+function computeUndetectedColumns(cols1, cols2, currentMappings, idCol1, idCol2, nameCol1, nameCol2) {
+  const mappedFile1 = new Set(currentMappings.map(m => m.file1).filter(Boolean));
+  const mappedFile2 = new Set(currentMappings.map(m => m.file2).filter(Boolean));
+  const exclude1 = new Set([idCol1, nameCol1].filter(Boolean));
+  const exclude2 = new Set([idCol2, nameCol2].filter(Boolean));
+
+  const undetected1 = cols1.filter(c => !mappedFile1.has(c) && !exclude1.has(c));
+  const undetected2 = cols2.filter(c => !mappedFile2.has(c) && !exclude2.has(c));
+
+  const pairs = [];
+  const used2 = new Set();
+
+  for (const col1 of undetected1) {
+    let bestMatch = '';
+    let bestScore = 0;
+    for (const col2 of undetected2) {
+      if (used2.has(col2)) continue;
+      const score = scoreColumnMatch(col1, [col2]);
+      if (score > bestScore) { bestScore = score; bestMatch = col2; }
+    }
+    if (bestMatch && bestScore >= 40) {
+      used2.add(bestMatch);
+      pairs.push({ col1, col2: bestMatch, label: col1, category: 'allowances', include: false });
+    } else {
+      pairs.push({ col1, col2: '', label: col1, category: 'allowances', include: false });
+    }
+  }
+  for (const col2 of undetected2) {
+    if (!used2.has(col2)) {
+      pairs.push({ col1: '', col2, label: col2, category: 'allowances', include: false });
+    }
+  }
+  return pairs;
 }
 
 function formatNumber(value, digits = 0) {
@@ -270,62 +327,344 @@ function PresenceList({ title, rows, tone }) {
   );
 }
 
-function AIAuditPanel({ audit }) {
-  if (!audit) return null;
+// ─── Severity config ──────────────────────────────────────────────────────────
+const SEV_CONFIG = {
+  critical: { bar: 'bg-red-500',    badge: 'bg-red-100 text-red-700 border-red-200',    card: 'border-red-200 bg-red-50/40',    icon: '⚠', label: 'Critical' },
+  high:     { bar: 'bg-orange-500', badge: 'bg-orange-100 text-orange-700 border-orange-200', card: 'border-orange-200 bg-orange-50/40', icon: '⚡', label: 'High'     },
+  medium:   { bar: 'bg-yellow-400', badge: 'bg-yellow-100 text-yellow-700 border-yellow-200', card: 'border-yellow-200 bg-yellow-50/40', icon: '◈', label: 'Medium'   },
+  low:      { bar: 'bg-emerald-500',badge: 'bg-emerald-100 text-emerald-700 border-emerald-200', card: 'border-emerald-200 bg-emerald-50/40', icon: '✓', label: 'Low' },
+};
 
-  const riskTone = {
-    low: 'badge-green',
-    medium: 'badge-yellow',
-    high: 'badge-red',
-  }[String(audit.risk_level || '').toLowerCase()] || 'badge-gray';
+const RISK_BANNER = {
+  critical: 'bg-red-600',
+  high:     'bg-orange-500',
+  medium:   'bg-yellow-500',
+  low:      'bg-emerald-500',
+  unknown:  'bg-slate-400',
+};
+
+const CATEGORY_LABELS = {
+  net_pay:         'Net Pay',
+  paye:            'PAYE / Tax',
+  ssnit:           'SSNIT',
+  provident_fund:  'Provident Fund',
+  allowances:      'Allowances',
+  presence:        'Presence',
+  duplicates:      'Duplicates',
+  names:           'Names',
+  account_numbers: 'Account No.',
+  salary:          'Salary',
+  cross_field:     'Cross-Field',
+  data_quality:    'Data Quality',
+};
+
+function SeverityBadge({ severity }) {
+  const cfg = SEV_CONFIG[severity?.toLowerCase()] || SEV_CONFIG.low;
+  return (
+    <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-semibold border ${cfg.badge}`}>
+      <span>{cfg.icon}</span>{cfg.label}
+    </span>
+  );
+}
+
+function FindingCard({ finding, index }) {
+  const [open, setOpen] = useState(false);
+  const cfg = SEV_CONFIG[finding.severity?.toLowerCase()] || SEV_CONFIG.low;
+  const catLabel = CATEGORY_LABELS[finding.category] || (finding.category || 'Finding');
 
   return (
-    <div className="card p-4 space-y-4">
-      <div className="flex flex-col gap-2 md:flex-row md:items-start md:justify-between">
-        <div>
-          <h2 className="text-sm font-medium text-slate-900">Local AI Inconsistency Report</h2>
-          <p className="text-xs text-slate-500 mt-1">
-            {audit.available ? `Generated with ${audit.model}` : `AI unavailable for ${audit.model}`}
-          </p>
+    <div className={`rounded-xl border ${cfg.card} overflow-hidden transition-shadow hover:shadow-sm`}>
+      {/* colour bar */}
+      <div className={`h-1 w-full ${cfg.bar}`} />
+      <div className="p-4 space-y-2">
+        {/* header row */}
+        <div className="flex items-start justify-between gap-2 flex-wrap">
+          <div className="flex items-center gap-2 flex-wrap">
+            <span className="text-[10px] font-semibold uppercase tracking-widest text-slate-400 bg-slate-100 rounded px-1.5 py-0.5">
+              #{index + 1}
+            </span>
+            <span className="text-[11px] font-medium text-slate-500 bg-white/80 border border-slate-200 rounded-full px-2 py-0.5">
+              {catLabel}
+            </span>
+            {finding.affected_count > 0 && (
+              <span className="text-[11px] text-slate-400">{finding.affected_count} affected</span>
+            )}
+          </div>
+          <SeverityBadge severity={finding.severity} />
         </div>
-        <span className={`badge ${riskTone}`}>Risk: {audit.risk_level || 'unknown'}</span>
+
+        {/* finding text */}
+        <p className="text-sm text-slate-800 leading-relaxed">{finding.finding}</p>
+
+        {/* recommended action */}
+        {finding.recommended_action && (
+          <div className="flex items-start gap-2 rounded-lg bg-white/60 border border-slate-200 px-3 py-2">
+            <span className="text-blue-500 mt-0.5 flex-shrink-0 text-xs font-bold">→</span>
+            <p className="text-xs text-slate-700 leading-relaxed">{finding.recommended_action}</p>
+          </div>
+        )}
+
+        {/* collapsible evidence */}
+        {finding.evidence && (
+          <button
+            type="button"
+            onClick={() => setOpen(o => !o)}
+            className="text-[11px] text-slate-400 hover:text-slate-600 flex items-center gap-1 transition-colors"
+          >
+            <span>{open ? '▾' : '▸'}</span> Evidence
+          </button>
+        )}
+        {open && finding.evidence && (
+          <div className="rounded-lg bg-slate-900 px-3 py-2 mt-1">
+            <p className="text-[11px] text-slate-300 font-mono leading-relaxed whitespace-pre-wrap break-all">
+              {finding.evidence}
+            </p>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function StatutoryGrid({ compliance }) {
+  if (!compliance) return null;
+  const checks = [
+    { key: 'ssnit_ok',   label: 'SSNIT' },
+    { key: 'paye_ok',    label: 'PAYE'  },
+    { key: 'net_pay_ok', label: 'Net Pay' },
+    { key: 'ssf_ok',     label: 'SSF'   },
+  ];
+  return (
+    <div className="space-y-2">
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+        {checks.map(({ key, label }) => {
+          const val = compliance[key];
+          const status = val === true ? 'ok' : val === false ? 'fail' : 'unknown';
+          const cls = {
+            ok:      'bg-emerald-50 border-emerald-200 text-emerald-700',
+            fail:    'bg-red-50 border-red-200 text-red-700',
+            unknown: 'bg-slate-50 border-slate-200 text-slate-500',
+          }[status];
+          const icon = { ok: '✓', fail: '✗', unknown: '—' }[status];
+          return (
+            <div key={key} className={`rounded-lg border p-2 text-center ${cls}`}>
+              <div className="text-lg font-bold">{icon}</div>
+              <div className="text-[11px] font-medium uppercase tracking-wide mt-0.5">{label}</div>
+            </div>
+          );
+        })}
+      </div>
+      {compliance.notes && (
+        <p className="text-[11px] text-slate-500 italic">{compliance.notes}</p>
+      )}
+    </div>
+  );
+}
+
+function AIAuditPanel({ audit }) {
+  const [activeTab, setActiveTab] = useState('findings');
+  if (!audit) return null;
+
+  const risk        = String(audit.risk_level || 'unknown').toLowerCase();
+  const riskBanner  = RISK_BANNER[risk] || RISK_BANNER.unknown;
+  const findings    = audit.key_findings || [];
+  const severityOrder = ['critical', 'high', 'medium', 'low'];
+  const sorted = [...findings].sort((a, b) => {
+    const ai = severityOrder.indexOf(String(a.severity || '').toLowerCase());
+    const bi = severityOrder.indexOf(String(b.severity || '').toLowerCase());
+    return (ai === -1 ? 99 : ai) - (bi === -1 ? 99 : bi);
+  });
+
+  const sevCounts = findings.reduce((acc, f) => {
+    const s = String(f.severity || 'low').toLowerCase();
+    acc[s] = (acc[s] || 0) + 1;
+    return acc;
+  }, {});
+
+  const tabs = [
+    { id: 'findings',   label: `Findings (${findings.length})` },
+    { id: 'statutory',  label: 'Statutory' },
+    { id: 'actions',    label: `Actions (${(audit.recommended_actions || []).length})` },
+  ];
+
+  return (
+    <div className="card overflow-hidden">
+      {/* risk banner */}
+      <div className={`${riskBanner} px-5 py-3 flex items-center justify-between gap-3 flex-wrap`}>
+        <div className="flex items-center gap-3">
+          <div>
+            <p className="text-xs font-semibold text-white/80 uppercase tracking-widest">AI Payroll Audit</p>
+            <p className="text-white font-semibold text-sm mt-0.5">
+              Risk Level: {risk.charAt(0).toUpperCase() + risk.slice(1)}
+            </p>
+          </div>
+        </div>
+        <div className="flex items-center gap-2 flex-wrap">
+          {sevCounts.critical > 0 && <span className="bg-white/20 text-white text-xs font-semibold rounded-full px-2 py-0.5">{sevCounts.critical} critical</span>}
+          {sevCounts.high     > 0 && <span className="bg-white/20 text-white text-xs font-semibold rounded-full px-2 py-0.5">{sevCounts.high} high</span>}
+          {sevCounts.medium   > 0 && <span className="bg-white/20 text-white text-xs font-semibold rounded-full px-2 py-0.5">{sevCounts.medium} medium</span>}
+          {sevCounts.low      > 0 && <span className="bg-white/20 text-white text-xs font-semibold rounded-full px-2 py-0.5">{sevCounts.low} low</span>}
+          {audit.chunks_total > 0 && (
+            <span className="bg-white/10 text-white/80 text-xs rounded-full px-2 py-0.5">
+              {audit.chunks_processed}/{audit.chunks_total} AI chunks
+              {audit.chunks_with_fallback > 0 ? ` (${audit.chunks_with_fallback} fallback)` : ''}
+            </span>
+          )}
+        </div>
       </div>
 
-      {audit.warning && (
-        <div className="rounded-md border border-amber-200 bg-amber-50 p-3 text-xs text-amber-800">
-          {audit.warning}
+      <div className="p-5 space-y-4">
+        {/* model + availability */}
+        <div className="flex items-center gap-2 flex-wrap">
+          <span className="text-xs text-slate-500">
+            {audit.available ? `Model: ${audit.model}` : `AI unavailable — ${audit.model}`}
+          </span>
+          {!audit.available && (
+            <span className="badge badge-yellow">Deterministic fallback active</span>
+          )}
         </div>
-      )}
 
-      {audit.executive_summary && (
-        <p className="text-sm text-slate-700 leading-6">{audit.executive_summary}</p>
-      )}
+        {/* warning box */}
+        {audit.warning && (
+          <div className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">
+            <p className="font-medium mb-0.5">AI layer note</p>
+            <p>{audit.warning}</p>
+          </div>
+        )}
 
-      {audit.key_findings?.length > 0 && (
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
-          {audit.key_findings.map((finding, index) => (
-            <div key={`${finding.category}-${index}`} className="rounded-lg border border-slate-200 bg-slate-50 p-3">
-              <div className="flex items-center justify-between gap-2">
-                <span className="text-xs font-semibold uppercase text-slate-600">{finding.category || 'finding'}</span>
-                <span className="badge badge-gray">{finding.severity || 'review'}</span>
-              </div>
-              <p className="text-sm text-slate-900 mt-2">{finding.finding}</p>
-              {finding.evidence && <p className="text-xs text-slate-500 mt-2">{finding.evidence}</p>}
-            </div>
+        {/* executive summary */}
+        {audit.executive_summary && (
+          <div className="rounded-xl border border-slate-200 bg-slate-50 px-4 py-3">
+            <p className="text-[10px] font-semibold uppercase tracking-widest text-slate-400 mb-1.5">Executive Summary</p>
+            <p className="text-sm text-slate-800 leading-relaxed">{audit.executive_summary}</p>
+          </div>
+        )}
+
+        {/* tab bar */}
+        <div className="flex rounded-lg border border-slate-200 overflow-hidden w-fit bg-slate-50 p-0.5 gap-0.5">
+          {tabs.map(tab => (
+            <button
+              key={tab.id}
+              type="button"
+              onClick={() => setActiveTab(tab.id)}
+              className={`px-4 py-1.5 rounded text-xs font-medium transition-all ${
+                activeTab === tab.id
+                  ? 'bg-white text-slate-900 shadow-sm'
+                  : 'text-slate-500 hover:text-slate-700 hover:bg-white/60'
+              }`}
+            >
+              {tab.label}
+            </button>
           ))}
         </div>
-      )}
 
-      {audit.recommended_actions?.length > 0 && (
-        <div>
-          <h3 className="text-xs font-semibold uppercase text-slate-600 mb-2">Recommended Actions</h3>
-          <ul className="space-y-1">
-            {audit.recommended_actions.map((action, index) => (
-              <li key={`${action}-${index}`} className="text-sm text-slate-700">- {action}</li>
-            ))}
-          </ul>
-        </div>
-      )}
+        {/* findings tab */}
+        {activeTab === 'findings' && (
+          <div className="space-y-3">
+            {sorted.length === 0 ? (
+              <div className="rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-4 text-center">
+                <p className="text-2xl mb-1">✓</p>
+                <p className="text-sm font-semibold text-emerald-800">No issues found</p>
+                <p className="text-xs text-emerald-600 mt-0.5">All deterministic checks passed.</p>
+              </div>
+            ) : (
+              sorted.map((finding, index) => (
+                <FindingCard key={`${finding.category}-${index}`} finding={finding} index={index} />
+              ))
+            )}
+          </div>
+        )}
+
+        {/* statutory compliance tab */}
+        {activeTab === 'statutory' && (
+          <StatutoryGrid compliance={audit.statutory_compliance} />
+        )}
+
+        {/* recommended actions tab */}
+        {activeTab === 'actions' && (
+          <div className="space-y-2">
+            {(audit.recommended_actions || []).length === 0 ? (
+              <p className="text-sm text-slate-500">No specific actions recommended.</p>
+            ) : (
+              (audit.recommended_actions || []).map((action, i) => (
+                <div key={i} className="flex items-start gap-3 rounded-xl border border-slate-200 bg-slate-50 px-4 py-3">
+                  <span className="flex-shrink-0 w-5 h-5 rounded-full bg-blue-100 text-blue-700 text-[11px] font-bold flex items-center justify-center mt-0.5">
+                    {i + 1}
+                  </span>
+                  <p className="text-sm text-slate-700 leading-relaxed">{action}</p>
+                </div>
+              ))
+            )}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ─── Column classification override panel ────────────────────────────────────
+
+const CATEGORY_OPTIONS = [
+  { value: 'auto',       label: 'Auto' },
+  { value: 'earnings',   label: 'Earnings' },
+  { value: 'allowances', label: 'Allowance' },
+  { value: 'deductions', label: 'Deduction' },
+  { value: 'identity',   label: 'Identity' },
+];
+
+const CAT_PILL = {
+  earnings:   'bg-blue-100 text-blue-700',
+  allowances: 'bg-emerald-100 text-emerald-700',
+  deductions: 'bg-red-100 text-red-700',
+  identity:   'bg-slate-100 text-slate-600',
+  auto:       'bg-slate-100 text-slate-500',
+};
+
+function ColumnClassificationPanel({ mappings, onChangeCategoryOverride }) {
+  if (!mappings || mappings.length === 0) return null;
+
+  return (
+    <div className="space-y-2">
+      <p className="text-xs text-slate-500 leading-relaxed">
+        If the automatic category detection is incorrect for any column, override it here.
+        These classifications help the AI understand your payroll structure.
+      </p>
+      <div className="rounded-xl border border-slate-200 overflow-hidden">
+        <table className="w-full text-sm">
+          <thead>
+            <tr className="bg-slate-50 border-b border-slate-200">
+              <th className="text-left px-4 py-2 text-xs font-semibold text-slate-500 uppercase tracking-wide">Field Label</th>
+              <th className="text-left px-4 py-2 text-xs font-semibold text-slate-500 uppercase tracking-wide hidden sm:table-cell">File 1 Column</th>
+              <th className="text-left px-4 py-2 text-xs font-semibold text-slate-500 uppercase tracking-wide hidden sm:table-cell">File 2 Column</th>
+              <th className="text-left px-4 py-2 text-xs font-semibold text-slate-500 uppercase tracking-wide">Category</th>
+            </tr>
+          </thead>
+          <tbody>
+            {mappings.map((m, i) => {
+              const current = m.category || 'auto';
+              return (
+                <tr key={i} className="border-b border-slate-100 last:border-0 hover:bg-slate-50/50">
+                  <td className="px-4 py-2.5 font-medium text-slate-800 text-xs">{m.label || m.file1}</td>
+                  <td className="px-4 py-2.5 text-slate-500 text-xs hidden sm:table-cell">{m.file1}</td>
+                  <td className="px-4 py-2.5 text-slate-500 text-xs hidden sm:table-cell">{m.file2}</td>
+                  <td className="px-4 py-2.5">
+                    <select
+                      value={current}
+                      onChange={e => onChangeCategoryOverride(i, e.target.value)}
+                      className={`text-xs font-medium rounded-full px-2 py-0.5 border-0 outline-none cursor-pointer ${CAT_PILL[current] || CAT_PILL.auto} appearance-none pr-5`}
+                      style={{ backgroundImage: 'url("data:image/svg+xml,%3Csvg xmlns=\'http://www.w3.org/2000/svg\' width=\'10\' height=\'6\'%3E%3Cpath fill=\'%23888\' d=\'M0 0l5 6 5-6z\'/%3E%3C/svg%3E")', backgroundRepeat: 'no-repeat', backgroundPosition: 'right 0.35rem center' }}
+                    >
+                      {CATEGORY_OPTIONS.map(opt => (
+                        <option key={opt.value} value={opt.value}>{opt.label}</option>
+                      ))}
+                    </select>
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
     </div>
   );
 }
@@ -406,6 +745,261 @@ function AuditTypeSelector({ value, onChange }) {
   );
 }
 
+// ─── Undetected Columns panel ─────────────────────────────────────────────────
+
+const UNDETECTED_CAT_OPTIONS = [
+  { value: 'allowances', label: 'Allowance' },
+  { value: 'deductions', label: 'Deduction' },
+  { value: 'earnings',   label: 'Earning'   },
+  { value: 'identity',   label: 'Identity'  },
+  { value: 'other',      label: 'Other'     },
+];
+
+function UndetectedColumnsPanel({ rows, onChange, onAddToAudit, onSaveToConfig, saving }) {
+  if (!rows || rows.length === 0) return null;
+
+  const anySelected = rows.some(r => r.include);
+
+  return (
+    <div className="rounded-xl border border-amber-200 bg-amber-50/60 p-4 space-y-3">
+      <div className="flex items-start justify-between gap-2 flex-wrap">
+        <div>
+          <h3 className="text-sm font-semibold text-amber-900">
+            Undetected Columns ({rows.length})
+          </h3>
+          <p className="text-xs text-amber-700 mt-0.5">
+            These columns were not automatically recognized. Select and classify the ones you
+            want to include in the audit, then add them or save to config for future auto-detection.
+          </p>
+        </div>
+        <div className="flex gap-2 flex-wrap">
+          <button
+            type="button"
+            disabled={!anySelected}
+            onClick={onAddToAudit}
+            className="btn btn-secondary text-xs disabled:opacity-40"
+          >
+            Add selected to audit
+          </button>
+          <button
+            type="button"
+            disabled={!anySelected || saving}
+            onClick={onSaveToConfig}
+            className="btn btn-primary text-xs disabled:opacity-40"
+          >
+            {saving ? 'Saving…' : 'Save selected to config'}
+          </button>
+        </div>
+      </div>
+
+      <div className="rounded-xl border border-amber-200 overflow-hidden bg-white">
+        <table className="w-full text-sm">
+          <thead>
+            <tr className="bg-amber-50 border-b border-amber-200">
+              <th className="px-3 py-2 w-8">
+                <input
+                  type="checkbox"
+                  title="Select all"
+                  checked={rows.length > 0 && rows.every(r => r.include)}
+                  onChange={e => rows.forEach((_, i) => onChange(i, 'include', e.target.checked))}
+                  className="rounded border-slate-300"
+                />
+              </th>
+              <th className="text-left px-3 py-2 text-xs font-semibold text-amber-700 uppercase tracking-wide">File 1 Column</th>
+              <th className="text-left px-3 py-2 text-xs font-semibold text-amber-700 uppercase tracking-wide hidden sm:table-cell">File 2 Column</th>
+              <th className="text-left px-3 py-2 text-xs font-semibold text-amber-700 uppercase tracking-wide">Label</th>
+              <th className="text-left px-3 py-2 text-xs font-semibold text-amber-700 uppercase tracking-wide">Category</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((row, i) => (
+              <tr key={i} className={`border-b border-amber-100 last:border-0 ${row.include ? 'bg-amber-50/40' : 'hover:bg-slate-50/40'}`}>
+                <td className="px-3 py-2">
+                  <input
+                    type="checkbox"
+                    checked={row.include}
+                    onChange={e => onChange(i, 'include', e.target.checked)}
+                    className="rounded border-slate-300"
+                  />
+                </td>
+                <td className="px-3 py-2 text-xs text-slate-700 font-medium">{row.col1 || <span className="text-slate-400 italic">—</span>}</td>
+                <td className="px-3 py-2 text-xs text-slate-500 hidden sm:table-cell">
+                  <input
+                    type="text"
+                    value={row.col2}
+                    onChange={e => onChange(i, 'col2', e.target.value)}
+                    placeholder="File 2 column name"
+                    className="input text-xs py-0.5 w-full"
+                  />
+                </td>
+                <td className="px-3 py-2">
+                  <input
+                    type="text"
+                    value={row.label}
+                    onChange={e => onChange(i, 'label', e.target.value)}
+                    className="input text-xs py-0.5 w-full"
+                  />
+                </td>
+                <td className="px-3 py-2">
+                  <select
+                    value={row.category}
+                    onChange={e => onChange(i, 'category', e.target.value)}
+                    className={`text-xs font-medium rounded-full px-2 py-0.5 border-0 outline-none cursor-pointer ${CAT_PILL[row.category] || CAT_PILL.auto} appearance-none pr-5`}
+                    style={{ backgroundImage: 'url("data:image/svg+xml,%3Csvg xmlns=\'http://www.w3.org/2000/svg\' width=\'10\' height=\'6\'%3E%3Cpath fill=\'%23888\' d=\'M0 0l5 6 5-6z\'/%3E%3C/svg%3E")', backgroundRepeat: 'no-repeat', backgroundPosition: 'right 0.35rem center' }}
+                  >
+                    {UNDETECTED_CAT_OPTIONS.map(opt => (
+                      <option key={opt.value} value={opt.value}>{opt.label}</option>
+                    ))}
+                  </select>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+// ─── Column Definitions Manager modal ─────────────────────────────────────────
+
+function ColumnDefsManagerModal({ entries, onClose, onSaveEntry, onReplaceAll }) {
+  const [localEntries, setLocalEntries] = useState(() =>
+    (entries || []).map(e => ({ ...e, _aliasText: (e.aliases || []).join(', ') }))
+  );
+  const [newEntry, setNewEntry] = useState({ label: '', aliases: '', category: 'allowances', type: 'currency' });
+  const [saving, setSaving] = useState(false);
+
+  function updateLocal(i, field, value) {
+    setLocalEntries(prev => prev.map((e, idx) => idx === i ? { ...e, [field]: value } : e));
+  }
+
+  async function handleSaveAll() {
+    setSaving(true);
+    try {
+      const cleaned = localEntries.map(e => ({
+        label:    e.label,
+        aliases:  e._aliasText.split(',').map(a => a.trim()).filter(Boolean),
+        category: e.category,
+        type:     e.type || 'currency',
+      }));
+      await onReplaceAll({ version: '1.0', entries: cleaned });
+      toast.success('Column definitions saved');
+      onClose();
+    } catch {
+      toast.error('Failed to save definitions');
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function handleAddNew() {
+    if (!newEntry.label.trim()) { toast.error('Label is required'); return; }
+    setSaving(true);
+    try {
+      await onSaveEntry({
+        label:    newEntry.label.trim(),
+        aliases:  newEntry.aliases.split(',').map(a => a.trim()).filter(Boolean),
+        category: newEntry.category,
+        type:     newEntry.type,
+      });
+      setLocalEntries(prev => [
+        ...prev,
+        { label: newEntry.label.trim(), _aliasText: newEntry.aliases, category: newEntry.category, type: newEntry.type },
+      ]);
+      setNewEntry({ label: '', aliases: '', category: 'allowances', type: 'currency' });
+      toast.success('Entry added');
+    } catch {
+      toast.error('Failed to add entry');
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-start justify-center pt-16 px-4 bg-black/40" onClick={onClose}>
+      <div className="bg-white rounded-2xl shadow-2xl w-full max-w-4xl max-h-[80vh] flex flex-col" onClick={e => e.stopPropagation()}>
+        {/* Header */}
+        <div className="px-6 py-4 border-b border-slate-200 flex items-center justify-between">
+          <div>
+            <h2 className="text-base font-semibold text-slate-900">Column Definitions</h2>
+            <p className="text-xs text-slate-500 mt-0.5">
+              Edit aliases and categories for any column. Changes are saved to <code className="bg-slate-100 px-1 rounded">column_definitions.json</code>.
+            </p>
+          </div>
+          <button type="button" onClick={onClose} className="text-slate-400 hover:text-slate-700 text-xl leading-none">✕</button>
+        </div>
+
+        {/* Table */}
+        <div className="overflow-y-auto flex-1 p-4 space-y-4">
+          {/* Add new */}
+          <div className="rounded-xl border border-emerald-200 bg-emerald-50/50 p-4 space-y-3">
+            <p className="text-xs font-semibold text-emerald-700 uppercase tracking-wide">Add New Entry</p>
+            <div className="grid grid-cols-1 sm:grid-cols-4 gap-2">
+              <input
+                type="text" placeholder="Label" value={newEntry.label}
+                onChange={e => setNewEntry(p => ({ ...p, label: e.target.value }))}
+                className="input text-xs"
+              />
+              <input
+                type="text" placeholder="Aliases (comma separated)" value={newEntry.aliases}
+                onChange={e => setNewEntry(p => ({ ...p, aliases: e.target.value }))}
+                className="input text-xs sm:col-span-2"
+              />
+              <select
+                value={newEntry.category}
+                onChange={e => setNewEntry(p => ({ ...p, category: e.target.value }))}
+                className="input text-xs"
+              >
+                {UNDETECTED_CAT_OPTIONS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+              </select>
+            </div>
+            <button type="button" onClick={handleAddNew} disabled={saving} className="btn btn-primary text-xs">Add entry</button>
+          </div>
+
+          {/* Existing entries */}
+          <div className="rounded-xl border border-slate-200 overflow-hidden">
+            <table className="w-full text-xs">
+              <thead>
+                <tr className="bg-slate-50 border-b border-slate-200">
+                  <th className="text-left px-3 py-2 font-semibold text-slate-500 uppercase tracking-wide w-40">Label</th>
+                  <th className="text-left px-3 py-2 font-semibold text-slate-500 uppercase tracking-wide">Aliases (comma separated)</th>
+                  <th className="text-left px-3 py-2 font-semibold text-slate-500 uppercase tracking-wide w-28">Category</th>
+                </tr>
+              </thead>
+              <tbody>
+                {localEntries.map((e, i) => (
+                  <tr key={i} className="border-b border-slate-100 last:border-0 hover:bg-slate-50/50">
+                    <td className="px-3 py-1.5">
+                      <input type="text" value={e.label} onChange={ev => updateLocal(i, 'label', ev.target.value)} className="input text-xs py-0.5 w-full" />
+                    </td>
+                    <td className="px-3 py-1.5">
+                      <input type="text" value={e._aliasText} onChange={ev => updateLocal(i, '_aliasText', ev.target.value)} className="input text-xs py-0.5 w-full" />
+                    </td>
+                    <td className="px-3 py-1.5">
+                      <select value={e.category} onChange={ev => updateLocal(i, 'category', ev.target.value)} className="input text-xs py-0.5 w-full">
+                        {UNDETECTED_CAT_OPTIONS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+                      </select>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        {/* Footer */}
+        <div className="px-6 py-3 border-t border-slate-200 flex justify-end gap-2">
+          <button type="button" onClick={onClose} className="btn btn-secondary text-xs">Cancel</button>
+          <button type="button" onClick={handleSaveAll} disabled={saving} className="btn btn-primary text-xs">
+            {saving ? 'Saving…' : 'Save all changes'}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ─── Mode tab bar ─────────────────────────────────────────────────────────────
 function ModeTabBar({ mode, onChange }) {
   const tabs = [
@@ -448,6 +1042,20 @@ export default function Comparison() {
 
   const [mode,      setMode]      = useState('audit');   // 'audit' | 'column'
   const [auditType, setAuditType] = useState('full');    // 'full' | 'allowances' | 'deductions'
+  const [showColumnClassification, setShowColumnClassification] = useState(false);
+  const [reconFilter, setReconFilter] = useState('open'); // 'all' | 'open' | 'approved' | 'rejected' | 'ignored'
+  const [reconSearch, setReconSearch] = useState('');
+  const [reconTypeFilter, setReconTypeFilter] = useState('all');
+  const [reconPage, setReconPage] = useState(1);
+  const [reconPageSize, setReconPageSize] = useState(50);
+  const [loadingBulk, setLoadingBulk] = useState(false);
+
+  // Column definitions state
+  const [mergedCatalog,     setMergedCatalog]     = useState(PAYROLL_FIELD_CATALOG);
+  const [apiColDefs,        setApiColDefs]        = useState([]);
+  const [showColDefsManager,setShowColDefsManager] = useState(false);
+  const [undetectedCols,    setUndetectedCols]    = useState([]);
+  const [savingColDef,      setSavingColDef]      = useState(false);
 
   const [matchOptions, setMatchOptions] = useState({
     idCol1:       '',
@@ -503,7 +1111,10 @@ export default function Comparison() {
     [mode, auditMappings, columnMappings]
   );
 
-  useEffect(() => { loadFiles(); }, []);
+  useEffect(() => {
+    loadFiles();
+    loadColumnDefinitions();
+  }, []);
 
   useEffect(() => {
     if (file1) {
@@ -547,23 +1158,34 @@ export default function Comparison() {
       const pairKey = `${file1}|${file2}|${auditType}`;
       if (mappingFilePair.current === pairKey) return;
       mappingFilePair.current = pairKey;
-      setAuditMappings(inferPayrollMappingsForType(file1Columns, file2Columns, auditType));
+      const mappings = inferPayrollMappingsForType(file1Columns, file2Columns, auditType, mergedCatalog);
+      setAuditMappings(mappings);
+      setUndetectedCols(computeUndetectedColumns(
+        file1Columns, file2Columns, mappings,
+        matchOptions.idCol1, matchOptions.idCol2,
+        matchOptions.nameCol1, matchOptions.nameCol2,
+      ));
       setResult(null);
       setReconciliationRun(null);
     } else {
       const pairKey = `${file1}|${file2}`;
       if (mappingFilePair.current === pairKey) return;
       mappingFilePair.current = pairKey;
-      const inferred = inferPayrollMappingsForType(file1Columns, file2Columns, 'full');
-      setColumnMappings(inferred.length > 0 ? inferred : [createEmptyMapping()]);
+      setColumnMappings([createEmptyMapping()]);
       setResult(null);
       setReconciliationRun(null);
     }
-  }, [file1, file2, file1Columns, file2Columns, auditType, mode]);
+  }, [file1, file2, file1Columns, file2Columns, auditType, mode, mergedCatalog]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     if (mode !== 'audit' || file1Columns.length === 0 || file2Columns.length === 0) return;
-    setAuditMappings(inferPayrollMappingsForType(file1Columns, file2Columns, auditType));
+    const mappings = inferPayrollMappingsForType(file1Columns, file2Columns, auditType, mergedCatalog);
+    setAuditMappings(mappings);
+    setUndetectedCols(computeUndetectedColumns(
+      file1Columns, file2Columns, mappings,
+      matchOptions.idCol1, matchOptions.idCol2,
+      matchOptions.nameCol1, matchOptions.nameCol2,
+    ));
     setResult(null);
     setReconciliationRun(null);
   }, [auditType]); // eslint-disable-line react-hooks/exhaustive-deps
@@ -601,12 +1223,73 @@ export default function Comparison() {
     }
   }
 
+  async function loadColumnDefinitions() {
+    try {
+      const data = await getColumnDefinitions();
+      const entries = data.entries || [];
+      setApiColDefs(entries);
+      const catalog = buildMergedCatalog(entries);
+      setMergedCatalog(catalog);
+      // Reset pair key so mappings regenerate with the enriched catalog
+      mappingFilePair.current = '';
+    } catch {
+      // Non-fatal: fall back to base catalog silently
+    }
+  }
+
   async function loadFileColumns(fileId, setColumns) {
     try {
       const data = await getFileColumns(fileId);
       setColumns(data.columns || []);
     } catch {
       toast.error('Failed to load columns');
+    }
+  }
+
+  function handleUndetectedColChange(index, field, value) {
+    setUndetectedCols(prev => prev.map((r, i) => i === index ? { ...r, [field]: value } : r));
+  }
+
+  function handleAddUndetectedToAudit() {
+    const selected = undetectedCols.filter(r => r.include && r.col1 && r.col2);
+    if (selected.length === 0) {
+      toast.error('Select rows with both file columns filled in to add them');
+      return;
+    }
+    const newMappings = selected.map(r => ({
+      file1:    r.col1,
+      file2:    r.col2,
+      label:    r.label || r.col1,
+      type:     'currency',
+      category: r.category,
+    }));
+    setAuditMappings(prev => [...prev, ...newMappings]);
+    // Remove the added rows from undetected list
+    const addedCol1s = new Set(selected.map(r => r.col1));
+    setUndetectedCols(prev => prev.filter(r => !addedCol1s.has(r.col1)));
+    toast.success(`Added ${newMappings.length} column(s) to the audit`);
+  }
+
+  async function handleSaveUndetectedToConfig() {
+    const selected = undetectedCols.filter(r => r.include);
+    if (selected.length === 0) { toast.error('Select at least one row to save'); return; }
+    setSavingColDef(true);
+    try {
+      for (const row of selected) {
+        if (!row.label.trim()) continue;
+        const aliases = [row.col1, row.col2, row.label]
+          .filter(Boolean)
+          .map(s => s.toLowerCase().trim())
+          .filter((v, i, a) => a.indexOf(v) === i);
+        await addColumnDefinitionEntry({ label: row.label, aliases, category: row.category, type: 'currency' });
+      }
+      toast.success(`Saved ${selected.length} column definition(s). Future uploads will auto-detect these columns.`);
+      // Reload catalog so new entries are used from now on
+      await loadColumnDefinitions();
+    } catch {
+      toast.error('Failed to save some column definitions');
+    } finally {
+      setSavingColDef(false);
     }
   }
 
@@ -619,6 +1302,14 @@ export default function Comparison() {
       toast.error(mode === 'audit' ? 'No matching payroll fields found — try different files' : 'Add at least one column pair');
       return;
     }
+
+    // Build column_roles map from manual overrides (excludes 'auto')
+    const column_roles = {};
+    activeMappings.forEach(m => {
+      if (m.category && m.category !== 'auto' && m.label) {
+        column_roles[m.label] = m.category;
+      }
+    });
 
     setLoading(true);
     clearErrorDetails();
@@ -635,6 +1326,7 @@ export default function Comparison() {
         keep_digits:     Number(matchOptions.keepDigits) || 5,
         tolerance:       Number(matchOptions.tolerance)  || 0.01,
         use_ai:          mode === 'audit',
+        column_roles:    Object.keys(column_roles).length > 0 ? column_roles : null,
       });
       setResult({ type: 'employee-data', ...data });
       setReconciliationExport(null);
@@ -654,6 +1346,12 @@ export default function Comparison() {
     } finally {
       setLoading(false);
     }
+  }
+
+  function handleCategoryOverride(mappingIndex, category) {
+    setAuditMappings(prev => prev.map((m, i) =>
+      i === mappingIndex ? { ...m, category } : m
+    ));
   }
 
   function handleDownloadResult(fileId) {
@@ -706,10 +1404,152 @@ export default function Comparison() {
     fileB: files.find(f => f.id === file2)?.filename,
   }), [files, file1, file2]);
 
-  const visibleReconciliationIssues = useMemo(
-    () => (reconciliationRun?.issues || []).slice(0, 40),
-    [reconciliationRun]
-  );
+  const previewColumns = useMemo(() => {
+    const fileAName = selectedFileNames.fileA || 'File 1';
+    const fileBName = selectedFileNames.fileB || 'File 2';
+
+    return [
+      {
+        accessorKey: 'employee_id',
+        header: 'Employee ID',
+        cell: ({ row }) => {
+          const empId = row.original.employee_id || row.original.file1_id || row.original.file2_id;
+          const name = row.original.file1_name || row.original.file2_name;
+          return (
+            <div className="py-1">
+              <div className="font-semibold text-slate-900 text-xs">{empId}</div>
+              {name && <div className="text-[10px] text-slate-500 font-medium truncate max-w-[150px]">{name}</div>}
+            </div>
+          );
+        }
+      },
+      {
+        accessorKey: 'field',
+        header: 'Field / Column',
+        cell: ({ row }) => {
+          const field = row.original.field || '—';
+          const col1 = row.original.file1_column;
+          const col2 = row.original.file2_column;
+          return (
+            <div className="py-1">
+              <div className="font-medium text-slate-800 text-xs">{field}</div>
+              {(col1 || col2) && (
+                <div className="text-[10px] text-slate-400 font-mono mt-0.5 flex flex-wrap items-center gap-1">
+                  {col1 && <span className="bg-slate-100 px-1 py-0.5 rounded border border-slate-200/60">{col1}</span>}
+                  {col1 && col2 && col1 !== col2 && <span className="text-slate-300">→</span>}
+                  {col2 && col1 !== col2 && <span className="bg-slate-100 px-1 py-0.5 rounded border border-slate-200/60">{col2}</span>}
+                </div>
+              )}
+            </div>
+          );
+        }
+      },
+      {
+        accessorKey: 'file1_value',
+        header: `Value in ${fileAName}`,
+        cell: ({ row }) => {
+          const val = row.original.file1_value;
+          const isNum = row.original.comparison_type === 'currency' || row.original.comparison_type === 'number';
+          if (val === null || val === undefined) return <span className="text-slate-400 italic text-xs">—</span>;
+          return (
+            <div className="px-2.5 py-1 bg-slate-50 border border-slate-200/60 rounded-lg font-mono text-xs text-slate-700 min-w-[100px] text-right shadow-sm inline-block">
+              {isNum ? formatCurrency(val) : String(val)}
+            </div>
+          );
+        }
+      },
+      {
+        accessorKey: 'file2_value',
+        header: `Value in ${fileBName}`,
+        cell: ({ row }) => {
+          const val = row.original.file2_value;
+          const isNum = row.original.comparison_type === 'currency' || row.original.comparison_type === 'number';
+          if (val === null || val === undefined) return <span className="text-slate-400 italic text-xs">—</span>;
+          return (
+            <div className="px-2.5 py-1 bg-indigo-50/50 border border-indigo-100 rounded-lg font-mono text-xs text-indigo-900 min-w-[100px] text-right shadow-sm inline-block">
+              {isNum ? formatCurrency(val) : String(val)}
+            </div>
+          );
+        }
+      },
+      {
+        accessorKey: 'difference',
+        header: 'Difference',
+        cell: ({ row }) => {
+          const val1 = row.original.file1_value;
+          const val2 = row.original.file2_value;
+          
+          let num1 = parseFloat(String(val1).replace(/,/g, '').replace(/[^\d.-]/g, ''));
+          let num2 = parseFloat(String(val2).replace(/,/g, '').replace(/[^\d.-]/g, ''));
+          
+          if (isNaN(num1) || isNaN(num2)) {
+            return <span className="text-slate-400 text-xs italic">N/A (Text)</span>;
+          }
+          
+          const diff = num2 - num1;
+          const isPos = diff > 0;
+          const isZero = Math.abs(diff) < 0.0001;
+          
+          const colorClass = isZero ? 'text-slate-500' : isPos ? 'text-emerald-600 font-semibold' : 'text-rose-600 font-semibold';
+          const bgClass = isZero ? 'bg-slate-50' : isPos ? 'bg-emerald-50/50' : 'bg-rose-50/50';
+          const borderClass = isZero ? 'border-slate-200/60' : isPos ? 'border-emerald-100' : 'border-rose-100';
+          
+          return (
+            <div className={`px-2.5 py-1 ${bgClass} border ${borderClass} rounded-lg font-mono text-xs ${colorClass} min-w-[85px] text-right shadow-sm inline-block`}>
+              {isZero ? '0.00' : `${isPos ? '+' : ''}${formatCurrency(diff)}`}
+            </div>
+          );
+        }
+      }
+    ];
+  }, [selectedFileNames]);
+
+  const filteredIssues = useMemo(() => {
+    let list = reconciliationRun?.issues || [];
+    if (reconFilter !== 'all') {
+      list = list.filter(i => i.status === reconFilter);
+    }
+    if (reconTypeFilter !== 'all') {
+      list = list.filter(i => i.issue_type === reconTypeFilter);
+    }
+    if (reconSearch.trim()) {
+      const q = reconSearch.toLowerCase().trim();
+      list = list.filter(i => 
+        (i.employee_id && String(i.employee_id).toLowerCase().includes(q)) ||
+        (i.employee_name && String(i.employee_name).toLowerCase().includes(q)) ||
+        (i.field && String(i.field).toLowerCase().includes(q)) ||
+        (i.issue_type && String(i.issue_type).toLowerCase().replaceAll('_', ' ').includes(q))
+      );
+    }
+    return list;
+  }, [reconciliationRun, reconFilter, reconTypeFilter, reconSearch]);
+
+  const visibleReconciliationIssues = useMemo(() => {
+    const start = (reconPage - 1) * reconPageSize;
+    return filteredIssues.slice(start, start + reconPageSize);
+  }, [filteredIssues, reconPage, reconPageSize]);
+
+  async function handleBulkAction(action) {
+    const runId = reconciliationRun?.id;
+    if (!runId || filteredIssues.length === 0) return;
+    
+    const confirmMsg = `Are you sure you want to ${action} all ${filteredIssues.length} filtered issues?`;
+    if (!window.confirm(confirmMsg)) return;
+
+    setLoadingBulk(true);
+    try {
+      const issueIds = filteredIssues.map(i => i.id);
+      const run = await applyBulkReconciliationAction(runId, issueIds, action);
+      setReconciliationRun(run);
+      setReconciliationExport(null);
+      setReconPage(1);
+      toast.success(`Successfully applied ${action} action to ${issueIds.length} issue(s)`);
+    } catch (error) {
+      toast.error(error?.response?.data?.detail || `Failed to apply action to issues`);
+    } finally {
+      setLoadingBulk(false);
+    }
+  }
 
   const approvedIssueCount = reconciliationRun?.status_counts?.approved || 0;
   const canRun = file1 && file2 && matchOptions.idCol1 && matchOptions.idCol2 && activeMappings.length > 0;
@@ -832,35 +1672,75 @@ export default function Comparison() {
         {/* ── Payroll Audit mode config ────────────────────────────────────── */}
         {mode === 'audit' && (
           <div className="p-5 space-y-4">
-            <div>
-              <h2 className="text-sm font-semibold text-slate-900">Audit Type</h2>
-              <p className="text-xs text-slate-500 mt-0.5">
-                Choose what area of the payroll to focus on. Fields are auto-detected from your files.
-              </p>
+            <div className="flex items-center justify-between gap-2 flex-wrap">
+              <div>
+                <h2 className="text-sm font-semibold text-slate-900">Audit Type</h2>
+                <p className="text-xs text-slate-500 mt-0.5">
+                  Choose what area of the payroll to focus on. Fields are auto-detected from your files.
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowColDefsManager(true)}
+                className="text-xs text-blue-600 hover:text-blue-800 font-medium flex items-center gap-1 border border-blue-200 rounded-lg px-3 py-1.5 bg-blue-50 hover:bg-blue-100 transition-colors"
+              >
+                ⚙ Manage Column Definitions
+              </button>
             </div>
 
             <AuditTypeSelector value={auditType} onChange={setAuditType} />
 
             {/* Auto-detected fields preview */}
             {auditMappings.length > 0 && (
-              <div className="rounded-xl border border-slate-200 bg-slate-50 p-4 space-y-2">
-                <p className="text-xs font-semibold text-slate-500 uppercase tracking-widest">
-                  Auto-detected fields ({auditMappings.length})
-                </p>
-                <div className="flex flex-wrap gap-2">
-                  {auditMappings.map((m, i) => (
-                    <span key={i} className="inline-flex items-center gap-1.5 rounded-full border border-slate-200 bg-white px-3 py-1 text-xs text-slate-700">
-                      <span className="font-medium">{m.label || m.file1}</span>
-                      {m.file1 !== m.file2 && <span className="text-slate-400">{m.file1} → {m.file2}</span>}
-                    </span>
-                  ))}
+              <div className="rounded-xl border border-slate-200 bg-slate-50 p-4 space-y-3">
+                <div className="flex items-center justify-between gap-2 flex-wrap">
+                  <p className="text-xs font-semibold text-slate-500 uppercase tracking-widest">
+                    Auto-detected fields ({auditMappings.length})
+                  </p>
+                  <button
+                    type="button"
+                    onClick={() => setShowColumnClassification(s => !s)}
+                    className="text-xs text-blue-600 hover:text-blue-800 font-medium flex items-center gap-1"
+                  >
+                    {showColumnClassification ? '▾ Hide' : '▸ Classify columns'}
+                  </button>
                 </div>
+                {!showColumnClassification && (
+                  <div className="flex flex-wrap gap-2">
+                    {auditMappings.map((m, i) => (
+                      <span
+                        key={i}
+                        className={`inline-flex items-center gap-1.5 rounded-full border px-3 py-1 text-xs font-medium ${CAT_PILL[m.category] || CAT_PILL.auto} border-transparent`}
+                      >
+                        {m.label || m.file1}
+                        {m.file1 !== m.file2 && <span className="opacity-60 font-normal ml-1">{m.file1} → {m.file2}</span>}
+                      </span>
+                    ))}
+                  </div>
+                )}
+                {showColumnClassification && (
+                  <ColumnClassificationPanel
+                    mappings={auditMappings}
+                    onChangeCategoryOverride={handleCategoryOverride}
+                  />
+                )}
               </div>
             )}
             {auditMappings.length === 0 && file1 && file2 && file1Columns.length > 0 && file2Columns.length > 0 && (
               <div className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800">
                 No matching fields found for this audit type. Try a different audit type or different files.
               </div>
+            )}
+
+            {/* Undetected columns panel */}
+            {mode === 'audit' && undetectedCols.length > 0 && (
+              <UndetectedColumnsPanel
+                rows={undetectedCols}
+                onChange={handleUndetectedColChange}
+                onAddToAudit={handleAddUndetectedToAudit}
+                onSaveToConfig={handleSaveUndetectedToConfig}
+                saving={savingColDef}
+              />
             )}
 
             <div className="flex justify-end pt-1">
@@ -933,9 +1813,35 @@ export default function Comparison() {
 
             <div className="flex flex-wrap items-center gap-3">
               <button type="button" onClick={addColumnMapping} className="btn btn-secondary text-xs">
-                Add column pair
+                + Add column pair
               </button>
-              <button onClick={handleRun} disabled={loading || !canRun} className="btn btn-primary">
+              <button
+                type="button"
+                onClick={() => {
+                  const inferred = inferPayrollMappingsForType(file1Columns, file2Columns, 'full', mergedCatalog);
+                  if (inferred.length > 0) {
+                    setColumnMappings(inferred);
+                    toast.success(`Auto-detected ${inferred.length} column pair(s)`);
+                  } else {
+                    toast.error('No matching columns could be auto-detected');
+                  }
+                }}
+                disabled={!file1 || !file2}
+                className="btn btn-secondary text-xs text-blue-600 hover:text-blue-800 hover:bg-blue-50 border-blue-200 disabled:opacity-40 disabled:hover:bg-transparent"
+              >
+                Auto-detect column pairs
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setColumnMappings([createEmptyMapping()]);
+                  toast.success('Column pairs cleared');
+                }}
+                className="btn btn-secondary text-xs text-rose-600 hover:text-rose-800 hover:bg-rose-50 border-rose-200"
+              >
+                Clear all
+              </button>
+              <button onClick={handleRun} disabled={loading || !canRun} className="btn btn-primary text-xs">
                 {loading ? 'Comparing…' : 'Run Comparison'}
               </button>
             </div>
@@ -1054,17 +1960,40 @@ export default function Comparison() {
               {/* Reconciliation workbench */}
               {reconciliationRun && (
                 <div className="card divide-y divide-slate-100">
-                  <div className="p-5 flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+                  {/* Workbench Title Header */}
+                  <div className="p-5 flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
                     <div>
                       <h2 className="text-sm font-semibold text-slate-900">Reconciliation Review Workbench</h2>
                       <p className="text-xs text-slate-500 mt-1">
                         Approve valid HR changes, reject incorrect differences, or ignore items that do not need action.
                       </p>
                     </div>
-                    <div className="flex flex-wrap gap-1.5 items-center">
-                      {Object.entries(reconciliationRun.status_counts || {}).map(([status, count]) => (
-                        <span key={status} className="badge badge-gray">{status}: {formatNumber(count)}</span>
-                      ))}
+                    <div className="flex flex-wrap gap-2.5 items-center">
+                      {/* Status filter tabs */}
+                      <div className="flex rounded-lg border border-slate-200 overflow-hidden bg-slate-50 p-0.5 text-xs font-medium">
+                        {['all', 'open', 'approved', 'rejected', 'ignored'].map(status => {
+                          const count = status === 'all'
+                            ? (reconciliationRun.issues || []).length
+                            : (reconciliationRun.status_counts?.[status] || 0);
+                          
+                          const isActive = reconFilter === status;
+                          return (
+                            <button
+                              key={status}
+                              type="button"
+                              onClick={() => { setReconFilter(status); setReconPage(1); }}
+                              className={`px-2.5 py-1 rounded transition-all capitalize ${
+                                isActive
+                                  ? 'bg-white text-slate-900 shadow-sm border border-slate-200/40'
+                                  : 'text-slate-500 hover:text-slate-700 hover:bg-white/40'
+                              }`}
+                            >
+                              {status} ({count})
+                            </button>
+                          );
+                        })}
+                      </div>
+
                       <button
                         onClick={handleExportApprovedUpdates}
                         disabled={exportingReconciliation || approvedIssueCount === 0}
@@ -1074,6 +2003,86 @@ export default function Comparison() {
                       </button>
                     </div>
                   </div>
+
+                  {/* Search and Filters row */}
+                  <div className="px-5 py-3 bg-slate-50/50 flex flex-wrap items-center justify-between gap-3">
+                    <div className="flex flex-wrap gap-2 items-center flex-1">
+                      {/* Search Bar */}
+                      <input
+                        type="text"
+                        placeholder="Search Employee ID, Name, Field or Issue..."
+                        value={reconSearch}
+                        onChange={e => { setReconSearch(e.target.value); setReconPage(1); }}
+                        className="input text-xs w-full sm:w-64 py-1.5"
+                      />
+                      
+                      {/* Issue Type Select */}
+                      <select
+                        value={reconTypeFilter}
+                        onChange={e => { setReconTypeFilter(e.target.value); setReconPage(1); }}
+                        className="input text-xs w-full sm:w-52 py-1.5"
+                      >
+                        <option value="all">All Issue Types</option>
+                        <option value="salary_change">Salary Changes</option>
+                        <option value="rank_change">Rank / Grade Changes</option>
+                        <option value="branch_change">Branch Changes</option>
+                        <option value="potential_new_hire">New Hires</option>
+                        <option value="potential_resignation">Resignations</option>
+                        <option value="allowance_or_deduction_change">Allowance / Deduction Changes</option>
+                        <option value="field_mismatch">Other Field Mismatches</option>
+                      </select>
+                    </div>
+
+                    <div className="text-xs text-slate-500 font-semibold">
+                      Found {filteredIssues.length} matching issues
+                    </div>
+                  </div>
+
+                  {/* Bulk Action panel */}
+                  {filteredIssues.length > 0 && (
+                    <div className="bg-blue-50/50 px-5 py-3 flex flex-wrap items-center justify-between gap-3">
+                      <div className="text-xs font-semibold text-blue-900 flex items-center gap-1.5">
+                        <span className="inline-block w-2 h-2 rounded-full bg-blue-500 animate-pulse" />
+                        Bulk Action on {filteredIssues.length} Filtered Issue(s) ({reconFilter !== 'all' ? reconFilter : 'all'} status):
+                      </div>
+                      <div className="flex flex-wrap gap-1.5">
+                        <button
+                          type="button"
+                          onClick={() => handleBulkAction('approve')}
+                          disabled={loadingBulk || filteredIssues.every(i => i.status === 'approved')}
+                          className="text-xs px-2.5 py-1.5 rounded-lg border font-semibold bg-emerald-600 hover:bg-emerald-700 border-emerald-600 text-white disabled:opacity-40 transition-colors shadow-sm"
+                        >
+                          {loadingBulk ? 'Processing…' : 'Approve All'}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => handleBulkAction('reject')}
+                          disabled={loadingBulk || filteredIssues.every(i => i.status === 'rejected')}
+                          className="text-xs px-2.5 py-1.5 rounded-lg border font-semibold bg-rose-600 hover:bg-rose-700 border-rose-600 text-white disabled:opacity-40 transition-colors shadow-sm"
+                        >
+                          {loadingBulk ? 'Processing…' : 'Reject All'}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => handleBulkAction('ignore')}
+                          disabled={loadingBulk || filteredIssues.every(i => i.status === 'ignored')}
+                          className="text-xs px-2.5 py-1.5 rounded-lg border font-semibold bg-slate-600 hover:bg-slate-700 border-slate-600 text-white disabled:opacity-40 transition-colors shadow-sm"
+                        >
+                          {loadingBulk ? 'Processing…' : 'Ignore All'}
+                        </button>
+                        {reconFilter !== 'open' && (
+                          <button
+                            type="button"
+                            onClick={() => handleBulkAction('reopen')}
+                            disabled={loadingBulk || filteredIssues.every(i => i.status === 'open')}
+                            className="text-xs px-2.5 py-1.5 rounded-lg border font-semibold bg-blue-600 hover:bg-blue-700 border-blue-600 text-white disabled:opacity-40 transition-colors shadow-sm"
+                          >
+                            {loadingBulk ? 'Processing…' : 'Reopen All'}
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                  )}
 
                   {reconciliationExport?.files && Object.keys(reconciliationExport.files).length > 0 && (
                     <div className="px-5 py-3 rounded-md border border-emerald-100 bg-emerald-50">
@@ -1096,64 +2105,171 @@ export default function Comparison() {
                           <th>Issue</th>
                           <th>Employee</th>
                           <th>Field</th>
-                          <th>Old</th>
-                          <th>New</th>
+                          <th>{reconciliationRun.file1_label || 'Original Value'}</th>
+                          <th>{reconciliationRun.file2_label || 'New Value'}</th>
+                          <th>Difference</th>
                           <th>Reason</th>
                           <th>Actions</th>
                         </tr>
                       </thead>
                       <tbody>
-                        {visibleReconciliationIssues.map(issue => (
-                          <tr key={issue.id}>
-                            <td>
-                              <span className={issue.status === 'approved' ? 'badge badge-green' : issue.status === 'open' ? 'badge badge-blue' : 'badge badge-gray'}>
-                                {issue.status}
-                              </span>
-                            </td>
-                            <td>
-                              <div className="font-medium text-slate-800">{issue.issue_type.replaceAll('_', ' ')}</div>
-                              <div className="text-[11px] text-slate-500">{Math.round((issue.confidence || 0) * 100)}% confidence</div>
-                            </td>
-                            <td>
-                              <div className="text-xs font-medium">{issue.employee_id || '-'}</div>
-                              {issue.employee_name && <div className="text-[11px] text-slate-500">{issue.employee_name}</div>}
-                            </td>
-                            <td>{issue.field || '-'}</td>
-                            <td>{issue.old_value ?? '-'}</td>
-                            <td>{issue.new_value ?? '-'}</td>
-                            <td>
-                              <div className="max-w-xs text-xs text-slate-600">{issue.explanation}</div>
-                              <div className="text-[11px] text-slate-400 mt-1">{issue.suggested_action}</div>
-                            </td>
-                            <td>
-                              <div className="flex flex-wrap gap-1">
-                                {issue.status !== 'approved' && (
-                                  <button onClick={() => handleReconciliationAction(issue.id, 'approve')} disabled={reconciliationActionId === issue.id} className="btn btn-secondary text-[11px] px-2 py-1">Approve</button>
+                        {visibleReconciliationIssues.map(issue => {
+                          const isNumeric = issue.old_value !== null && issue.new_value !== null && 
+                            !isNaN(parseFloat(String(issue.old_value).replace(/,/g, ''))) && 
+                            !isNaN(parseFloat(String(issue.new_value).replace(/,/g, '')));
+                          
+                          const diff = issue.difference;
+                          const isPos = diff > 0;
+                          const isZero = diff !== null && Math.abs(diff) < 0.0001;
+                          
+                          const colorClass = isZero ? 'text-slate-500' : isPos ? 'text-emerald-600 font-semibold' : 'text-rose-600 font-semibold';
+                          const bgClass = isZero ? 'bg-slate-50' : isPos ? 'bg-emerald-50/50' : 'bg-rose-50/50';
+                          const borderClass = isZero ? 'border-slate-200/60' : isPos ? 'border-emerald-100' : 'border-rose-100';
+
+                          let statusBadgeClass = 'inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-semibold border ';
+                          if (issue.status === 'approved') statusBadgeClass += 'bg-emerald-100 border-emerald-200 text-emerald-800';
+                          else if (issue.status === 'open') statusBadgeClass += 'bg-blue-100 border-blue-200 text-blue-800';
+                          else if (issue.status === 'rejected') statusBadgeClass += 'bg-rose-100 border-rose-200 text-rose-800';
+                          else statusBadgeClass += 'bg-slate-100 border-slate-200 text-slate-700';
+
+                          return (
+                            <tr key={issue.id}>
+                              <td>
+                                <span className={statusBadgeClass}>
+                                  {issue.status}
+                                </span>
+                              </td>
+                              <td>
+                                <div className="font-semibold text-slate-800 text-xs">{issue.issue_type.replaceAll('_', ' ')}</div>
+                                <div className="text-[10px] text-slate-400 font-medium mt-0.5">{Math.round((issue.confidence || 0) * 100)}% confidence</div>
+                              </td>
+                              <td>
+                                <div className="text-xs font-semibold text-slate-900">{issue.employee_id || '-'}</div>
+                                {issue.employee_name && <div className="text-[10px] text-slate-500 font-medium truncate max-w-[120px]" title={issue.employee_name}>{issue.employee_name}</div>}
+                              </td>
+                              <td className="text-xs font-medium text-slate-700">{issue.field || '-'}</td>
+                              <td>
+                                <div className="px-2 py-0.5 bg-slate-50 border border-slate-200/60 rounded-md font-mono text-[11px] text-slate-700 min-w-[70px] text-right shadow-sm inline-block">
+                                  {isNumeric ? formatCurrency(issue.old_value) : (issue.old_value ?? '-')}
+                                </div>
+                              </td>
+                              <td>
+                                <div className="px-2 py-0.5 bg-indigo-50/50 border border-indigo-100 rounded-md font-mono text-[11px] text-indigo-900 min-w-[70px] text-right shadow-sm inline-block">
+                                  {isNumeric ? formatCurrency(issue.new_value) : (issue.new_value ?? '-')}
+                                </div>
+                              </td>
+                              <td>
+                                {isNumeric && diff !== null ? (
+                                  <div className={`px-2 py-0.5 ${bgClass} border ${borderClass} rounded-md font-mono text-[11px] ${colorClass} min-w-[65px] text-right shadow-sm inline-block`}>
+                                    {isZero ? '0.00' : `${isPos ? '+' : ''}${formatCurrency(diff)}`}
+                                  </div>
+                                ) : (
+                                  <span className="text-slate-400 text-[10px] italic font-medium">Text change</span>
                                 )}
-                                {issue.status !== 'rejected' && (
-                                  <button onClick={() => handleReconciliationAction(issue.id, 'reject')} disabled={reconciliationActionId === issue.id} className="btn btn-secondary text-[11px] px-2 py-1">Reject</button>
-                                )}
-                                {issue.status !== 'ignored' && (
-                                  <button onClick={() => handleReconciliationAction(issue.id, 'ignore')} disabled={reconciliationActionId === issue.id} className="btn btn-secondary text-[11px] px-2 py-1">Ignore</button>
-                                )}
-                                {issue.status !== 'open' && (
-                                  <button onClick={() => handleReconciliationAction(issue.id, 'reopen')} disabled={reconciliationActionId === issue.id} className="btn btn-secondary text-[11px] px-2 py-1">Reopen</button>
-                                )}
-                              </div>
-                            </td>
-                          </tr>
-                        ))}
+                              </td>
+                              <td>
+                                <div className="max-w-[200px] text-[11px] text-slate-700 leading-relaxed font-medium">{issue.explanation}</div>
+                                <div className="text-[10px] text-slate-400 mt-1 italic">{issue.suggested_action}</div>
+                              </td>
+                              <td>
+                                <div className="flex flex-wrap gap-1">
+                                  {issue.status !== 'approved' && (
+                                    <button
+                                      onClick={() => handleReconciliationAction(issue.id, 'approve')}
+                                      disabled={reconciliationActionId === issue.id}
+                                      className="text-[11px] px-2 py-1 rounded border font-semibold bg-emerald-50 hover:bg-emerald-100/80 border-emerald-200 text-emerald-700 disabled:opacity-40 transition-colors shadow-sm"
+                                    >
+                                      Approve
+                                    </button>
+                                  )}
+                                  {issue.status !== 'rejected' && (
+                                    <button
+                                      onClick={() => handleReconciliationAction(issue.id, 'reject')}
+                                      disabled={reconciliationActionId === issue.id}
+                                      className="text-[11px] px-2 py-1 rounded border font-semibold bg-rose-50 hover:bg-rose-100/80 border-rose-200 text-rose-700 disabled:opacity-40 transition-colors shadow-sm"
+                                    >
+                                      Reject
+                                    </button>
+                                  )}
+                                  {issue.status !== 'ignored' && (
+                                    <button
+                                      onClick={() => handleReconciliationAction(issue.id, 'ignore')}
+                                      disabled={reconciliationActionId === issue.id}
+                                      className="text-[11px] px-2 py-1 rounded border font-semibold bg-slate-50 hover:bg-slate-100/80 border-slate-200 text-slate-600 disabled:opacity-40 transition-colors shadow-sm"
+                                    >
+                                      Ignore
+                                    </button>
+                                  )}
+                                  {issue.status !== 'open' && (
+                                    <button
+                                      onClick={() => handleReconciliationAction(issue.id, 'reopen')}
+                                      disabled={reconciliationActionId === issue.id}
+                                      className="text-[11px] px-2 py-1 rounded border font-semibold bg-blue-50 hover:bg-blue-100/80 border-blue-200 text-blue-700 disabled:opacity-40 transition-colors shadow-sm"
+                                    >
+                                      Reopen
+                                    </button>
+                                  )}
+                                </div>
+                              </td>
+                            </tr>
+                          );
+                        })}
                         {visibleReconciliationIssues.length === 0 && (
-                          <tr><td colSpan={8}>No reconciliation issues were generated.</td></tr>
+                          <tr><td colSpan={9} className="text-center py-6 text-sm text-slate-500">No reconciliation issues found.</td></tr>
                         )}
                       </tbody>
                     </table>
                   </div>
 
-                  {(reconciliationRun.issues || []).length > visibleReconciliationIssues.length && (
-                    <p className="px-5 py-3 text-xs text-slate-500">
-                      Showing {formatNumber(visibleReconciliationIssues.length)} of {formatNumber(reconciliationRun.issues.length)} issues.
-                    </p>
+                  {/* Pagination footer */}
+                  {filteredIssues.length > 0 && (
+                    <div className="px-5 py-3 flex flex-wrap items-center justify-between gap-2 text-xs border-t border-slate-100 bg-slate-50/50 font-medium">
+                      <div className="text-slate-500">
+                        Showing {((reconPage - 1) * reconPageSize) + 1}–{Math.min(reconPage * reconPageSize, filteredIssues.length)} of {filteredIssues.length} issue(s)
+                        {filteredIssues.length < (reconciliationRun.issues || []).length && ` (filtered from ${(reconciliationRun.issues || []).length} total)`}
+                      </div>
+                      
+                      {/* Pagination Controls */}
+                      {Math.ceil(filteredIssues.length / reconPageSize) > 1 && (
+                        <div className="flex items-center gap-1.5">
+                          <button
+                            type="button"
+                            disabled={reconPage === 1}
+                            onClick={() => setReconPage(1)}
+                            className="px-2 py-1 border rounded hover:bg-slate-100 disabled:opacity-40 disabled:hover:bg-transparent"
+                          >
+                            « First
+                          </button>
+                          <button
+                            type="button"
+                            disabled={reconPage === 1}
+                            onClick={() => setReconPage(p => Math.max(1, p - 1))}
+                            className="px-2 py-1 border rounded hover:bg-slate-100 disabled:opacity-40 disabled:hover:bg-transparent"
+                          >
+                            ‹ Prev
+                          </button>
+                          <span className="text-slate-600 px-1">
+                            Page {reconPage} of {Math.ceil(filteredIssues.length / reconPageSize)}
+                          </span>
+                          <button
+                            type="button"
+                            disabled={reconPage === Math.ceil(filteredIssues.length / reconPageSize)}
+                            onClick={() => setReconPage(p => Math.min(Math.ceil(filteredIssues.length / reconPageSize), p + 1))}
+                            className="px-2 py-1 border rounded hover:bg-slate-100 disabled:opacity-40 disabled:hover:bg-transparent"
+                          >
+                            Next ›
+                          </button>
+                          <button
+                            type="button"
+                            disabled={reconPage === Math.ceil(filteredIssues.length / reconPageSize)}
+                            onClick={() => setReconPage(Math.ceil(filteredIssues.length / reconPageSize))}
+                            className="px-2 py-1 border rounded hover:bg-slate-100 disabled:opacity-40 disabled:hover:bg-transparent"
+                          >
+                            Last »
+                          </button>
+                        </div>
+                      )}
+                    </div>
                   )}
                 </div>
               )}
@@ -1199,9 +2315,22 @@ export default function Comparison() {
               </div>
               <span className="badge badge-gray">{formatNumber(result.preview_differences?.length || 0)} preview rows</span>
             </div>
-            <DataTable data={result.preview_differences || []} />
+            <DataTable data={result.preview_differences || []} columns={previewColumns} allowHorizontalScroll={true} />
           </div>
         </div>
+      )}
+
+      {/* ── Column Definitions Manager modal ───────────────────────────────── */}
+      {showColDefsManager && (
+        <ColumnDefsManagerModal
+          entries={apiColDefs}
+          onClose={() => setShowColDefsManager(false)}
+          onSaveEntry={addColumnDefinitionEntry}
+          onReplaceAll={async (defs) => {
+            await replaceColumnDefinitions(defs);
+            await loadColumnDefinitions();
+          }}
+        />
       )}
     </div>
   );

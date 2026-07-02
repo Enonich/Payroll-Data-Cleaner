@@ -222,6 +222,15 @@ export const applyReconciliationAction = async (runId, issueId, action, note = '
   return response.data;
 };
 
+export const applyBulkReconciliationAction = async (runId, issueIds, action, note = '') => {
+  const response = await api.post(`/reconciliation/${runId}/issues/bulk/action`, {
+    issue_ids: issueIds,
+    action,
+    note,
+  });
+  return response.data;
+};
+
 export const exportApprovedReconciliationUpdates = async (runId) => {
   const response = await api.post(`/reconciliation/${runId}/export-approved`);
   return response.data;
@@ -250,6 +259,22 @@ export const downloadExcel = (fileId, filename) => {
 
 export const getFileStats = async (fileId) => {
   const response = await api.get(`/export/${fileId}/stats`);
+  return response.data;
+};
+
+// Column Definitions endpoints
+export const getColumnDefinitions = async () => {
+  const response = await api.get('/column-definitions/');
+  return response.data;
+};
+
+export const addColumnDefinitionEntry = async (entry) => {
+  const response = await api.post('/column-definitions/entries', entry);
+  return response.data;
+};
+
+export const replaceColumnDefinitions = async (definitions) => {
+  const response = await api.put('/column-definitions/', definitions);
   return response.data;
 };
 

@@ -43,7 +43,8 @@ from app.config import (
 SALARY_CHANGE_THRESHOLD  = 0.20  # Flag salary/net-pay changes > 20 %
 NAME_SIMILARITY_THRESHOLD = 65   # RapidFuzz token_sort_ratio minimum (0-100)
 
-# Field-label token sets used to classify mismatch rows
+# Field-label token sets used to classify mismatch rows.
+# Base defaults are enriched at runtime from column_definitions.json.
 _SALARY_FIELD_TOKENS = {"basic", "salary", "gross", "net", "pay", "take", "home"}
 _NET_PAY_TOKENS      = {"net", "pay", "take", "home", "net pay", "take home"}
 _SSF_TOKENS          = {"ssf", "ssnit", "social", "security"}
@@ -53,6 +54,21 @@ _ALLOWANCE_TOKENS    = {
 }
 _NAME_TOKENS         = {"name", "employee name", "full name", "staff name"}
 _EMPLOYER_TOKENS     = {"tier1", "tier 1", "tier2", "tier 2", "mop", "ssnit employer"}
+
+
+def _load_tokens_from_config() -> None:
+    """Enrich the module-level token sets with keywords from column_definitions.json."""
+    global _ALLOWANCE_TOKENS, _SALARY_FIELD_TOKENS
+    try:
+        from app.services.column_definition_service import get_token_sets
+        ts = get_token_sets()
+        _ALLOWANCE_TOKENS = _ALLOWANCE_TOKENS | ts.get("allowances", set())
+        _SALARY_FIELD_TOKENS = _SALARY_FIELD_TOKENS | ts.get("earnings", set())
+    except Exception:  # pragma: no cover — fail silently, keep defaults
+        pass
+
+
+_load_tokens_from_config()
 
 
 def _field_matches(field_label: str, tokens: set) -> bool:

@@ -406,6 +406,55 @@ class ReconciliationService:
         return cls.get_run(run_id)
 
     @classmethod
+    def apply_bulk_issue_action(
+        cls,
+        run_id: str,
+        issue_ids: List[str],
+        action: str,
+        actor: str = "Payroll Officer",
+        note: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        if action not in VALID_ACTIONS:
+            raise ValueError(f"Invalid action '{action}'")
+
+        if not issue_ids:
+            return cls.get_run(run_id)
+
+        after_status = {
+            "approve": "approved",
+            "reject": "rejected",
+            "ignore": "ignored",
+            "reopen": "open",
+        }[action]
+
+        placeholders = ",".join("?" for _ in issue_ids)
+        rows = DBService.fetch_all(
+            f"SELECT id, status FROM reconciliation_issues WHERE id IN ({placeholders}) AND run_id = ?",
+            (*issue_ids, run_id),
+        )
+
+        now = cls._now()
+        for row in rows:
+            before_status = row["status"]
+            issue_id = row["id"]
+            
+            DBService.execute(
+                """
+                UPDATE reconciliation_issues
+                SET status = ?, updated_at = ?
+                WHERE id = ? AND run_id = ?
+                """,
+                (after_status, now, issue_id, run_id),
+            )
+            cls._record_audit(run_id, issue_id, action, actor, note, before_status, after_status)
+
+        DBService.execute(
+            "UPDATE reconciliation_runs SET updated_at = ? WHERE id = ?",
+            (now, run_id),
+        )
+        return cls.get_run(run_id)
+
+    @classmethod
     def export_approved_updates(cls, run_id: str) -> Dict[str, Any]:
         run = cls.get_run(run_id)
         approved = [issue for issue in run["issues"] if issue["status"] == "approved"]

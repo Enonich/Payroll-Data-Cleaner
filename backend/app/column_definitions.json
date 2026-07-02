@@ -1,0 +1,758 @@
+{
+  "version": "1.0",
+  "entries": [
+    {
+      "label": "Basic Salary",
+      "aliases": [
+        "basic salary",
+        "basicsalary",
+        "basic",
+        "basic pay",
+        "base salary",
+        "base pay"
+      ],
+      "category": "earnings",
+      "type": "currency"
+    },
+    {
+      "label": "Annual Salary",
+      "aliases": [
+        "annual salary",
+        "annualsalary",
+        "annual",
+        "old annual salary",
+        "new annual salary"
+      ],
+      "category": "earnings",
+      "type": "currency"
+    },
+    {
+      "label": "Gross Salary",
+      "aliases": [
+        "gross salary",
+        "grosssalary",
+        "gross",
+        "gross pay",
+        "gross income"
+      ],
+      "category": "earnings",
+      "type": "currency"
+    },
+    {
+      "label": "Taxable Allowance",
+      "aliases": [
+        "taxable allowance",
+        "taxableallowance",
+        "taxable alloc"
+      ],
+      "category": "allowances",
+      "type": "currency"
+    },
+    {
+      "label": "Utility Allowance",
+      "aliases": [
+        "utility allowance",
+        "utility alloc",
+        "utility",
+        "utilities"
+      ],
+      "category": "allowances",
+      "type": "currency"
+    },
+    {
+      "label": "Transport Allowance",
+      "aliases": [
+        "transport allowance",
+        "transport alloc",
+        "transport",
+        "travel allowance",
+        "travel",
+        "commuter allowance"
+      ],
+      "category": "allowances",
+      "type": "currency"
+    },
+    {
+      "label": "Housing Allowance",
+      "aliases": [
+        "housing allowance",
+        "housing",
+        "rent allowance",
+        "rent alloc",
+        "rent",
+        "furnishing allowance",
+        "furnishing"
+      ],
+      "category": "allowances",
+      "type": "currency"
+    },
+    {
+      "label": "Risk Allowance",
+      "aliases": [
+        "risk allowance",
+        "risk alloc",
+        "risk",
+        "hazard allowance",
+        "hazard"
+      ],
+      "category": "allowances",
+      "type": "currency"
+    },
+    {
+      "label": "Responsibility Allowance",
+      "aliases": [
+        "responsibility allowance",
+        "responsibility alloc",
+        "responsibility",
+        "acting allowance",
+        "acting"
+      ],
+      "category": "allowances",
+      "type": "currency"
+    },
+    {
+      "label": "Lunch Allowance",
+      "aliases": [
+        "lunch allowance",
+        "lunch alloc",
+        "lunch",
+        "meal allowance",
+        "meal"
+      ],
+      "category": "allowances",
+      "type": "currency"
+    },
+    {
+      "label": "Enhancement Allowance",
+      "aliases": [
+        "enhancement allowance",
+        "enhancement alloc",
+        "enhancement"
+      ],
+      "category": "allowances",
+      "type": "currency"
+    },
+    {
+      "label": "Local Allowance",
+      "aliases": [
+        "local allowance",
+        "local alloc",
+        "local"
+      ],
+      "category": "allowances",
+      "type": "currency"
+    },
+    {
+      "label": "Senior Staff Allowance",
+      "aliases": [
+        "senior staff allowance",
+        "senior staff alloc",
+        "senior staff",
+        "senior allowance"
+      ],
+      "category": "allowances",
+      "type": "currency"
+    },
+    {
+      "label": "Campus Allowance",
+      "aliases": [
+        "campus allowance",
+        "campus alloc",
+        "campus"
+      ],
+      "category": "allowances",
+      "type": "currency"
+    },
+    {
+      "label": "Leave Allowance",
+      "aliases": [
+        "leave allowance",
+        "leave alloc",
+        "leave",
+        "annual leave allowance"
+      ],
+      "category": "allowances",
+      "type": "currency"
+    },
+    {
+      "label": "Entertainment Allowance",
+      "aliases": [
+        "entertainment allowance",
+        "entertainment alloc",
+        "entertainment"
+      ],
+      "category": "allowances",
+      "type": "currency"
+    },
+    {
+      "label": "Bonus",
+      "aliases": [
+        "bonus",
+        "annual bonus",
+        "performance bonus",
+        "ssnit bonus"
+      ],
+      "category": "allowances",
+      "type": "currency"
+    },
+    {
+      "label": "Other Allowances",
+      "aliases": [
+        "other allowances",
+        "other allowance",
+        "allowance",
+        "alloc",
+        "misc allowance"
+      ],
+      "category": "allowances",
+      "type": "currency"
+    },
+    {
+      "label": "Taxable Salary",
+      "aliases": [
+        "taxable salary",
+        "taxablesalary",
+        "taxable income",
+        "taxable pay"
+      ],
+      "category": "earnings",
+      "type": "currency"
+    },
+    {
+      "label": "Net Salary",
+      "aliases": [
+        "net salary",
+        "net pay",
+        "netpay",
+        "take home",
+        "takehome",
+        "net income"
+      ],
+      "category": "earnings",
+      "type": "currency"
+    },
+    {
+      "label": "5.5% SSF",
+      "aliases": [
+        "5.5% ssf",
+        "55 ssf",
+        "55ssf",
+        "ssf 5.5",
+        "ssf5.5",
+        "ssf employee",
+        "ssnit employee",
+        "5.5% ssnit",
+        "employee ssf",
+        "employee ssnit"
+      ],
+      "category": "deductions",
+      "type": "currency"
+    },
+    {
+      "label": "4.5% Staff PF",
+      "aliases": [
+        "4.5% staff pf",
+        "45staffpf",
+        "staff pf",
+        "staffpf",
+        "45 pf",
+        "4.5% pf",
+        "pf employee",
+        "employee pf",
+        "staff provident"
+      ],
+      "category": "deductions",
+      "type": "currency"
+    },
+    {
+      "label": "Tax Relief",
+      "aliases": [
+        "tax relief",
+        "taxrelief",
+        "relief"
+      ],
+      "category": "deductions",
+      "type": "currency"
+    },
+    {
+      "label": "Income Tax",
+      "aliases": [
+        "income tax",
+        "incometax",
+        "paye",
+        "p.a.y.e",
+        "tax",
+        "it"
+      ],
+      "category": "deductions",
+      "type": "currency"
+    },
+    {
+      "label": "13% SSF",
+      "aliases": [
+        "13% ssf",
+        "13ssf",
+        "ssf employer",
+        "13% ssnit",
+        "employer ssf",
+        "employer ssnit"
+      ],
+      "category": "deductions",
+      "type": "currency"
+    },
+    {
+      "label": "11% PF",
+      "aliases": [
+        "11% pf",
+        "11pf",
+        "pf employer",
+        "employer pf",
+        "11% provident"
+      ],
+      "category": "deductions",
+      "type": "currency"
+    },
+    {
+      "label": "1st Tier (13.5%)",
+      "aliases": [
+        "1st tier (13.5%)",
+        "1st tier 13.5",
+        "1sttier135",
+        "first tier 13.5",
+        "ssnit tier1",
+        "tier 1 13.5",
+        "tier1 13.5",
+        "1st tier"
+      ],
+      "category": "deductions",
+      "type": "currency"
+    },
+    {
+      "label": "1st Tier (5%)",
+      "aliases": [
+        "1st tier (5%)",
+        "1st tier 5",
+        "1sttier5",
+        "first tier 5",
+        "ssnit tier1 5",
+        "tier 1 5",
+        "tier1 5"
+      ],
+      "category": "deductions",
+      "type": "currency"
+    },
+    {
+      "label": "2nd Tier",
+      "aliases": [
+        "2nd tier",
+        "second tier",
+        "tier 2",
+        "tier2",
+        "2ndtier"
+      ],
+      "category": "deductions",
+      "type": "currency"
+    },
+    {
+      "label": "3rd Tier (15.5%)",
+      "aliases": [
+        "3rd tier (15.5%)",
+        "3rd tier 15.5",
+        "3rdtier155",
+        "third tier 15.5",
+        "tier 3",
+        "tier3"
+      ],
+      "category": "deductions",
+      "type": "currency"
+    },
+    {
+      "label": "Total Deductions",
+      "aliases": [
+        "total deductions",
+        "totaldeductions",
+        "total deduction"
+      ],
+      "category": "deductions",
+      "type": "currency"
+    },
+    {
+      "label": "Other Deductions",
+      "aliases": [
+        "other deductions",
+        "otherdeductions",
+        "misc deductions",
+        "other deduction"
+      ],
+      "category": "deductions",
+      "type": "currency"
+    },
+    {
+      "label": "Student Loan",
+      "aliases": [
+        "student loan",
+        "studentloan",
+        "loan deduction",
+        "loan"
+      ],
+      "category": "deductions",
+      "type": "currency"
+    },
+    {
+      "label": "Welfare",
+      "aliases": [
+        "welfare",
+        "staff welfare",
+        "social welfare"
+      ],
+      "category": "deductions",
+      "type": "currency"
+    },
+    {
+      "label": "Provident Fund",
+      "aliases": [
+        "provident fund",
+        "providentfund",
+        "pf"
+      ],
+      "category": "deductions",
+      "type": "currency"
+    },
+    {
+      "label": "Security Deduction",
+      "aliases": [
+        "security deduction",
+        "security contribution",
+        "security"
+      ],
+      "category": "deductions",
+      "type": "currency"
+    },
+    {
+      "label": "ICU/PMSU",
+      "aliases": [
+        "icu",
+        "pmsu",
+        "icu pmsu",
+        "union dues",
+        "union"
+      ],
+      "category": "deductions",
+      "type": "currency"
+    },
+    {
+      "label": "ABFA",
+      "aliases": [
+        "abfa"
+      ],
+      "category": "deductions",
+      "type": "currency"
+    },
+    {
+      "label": "Telecom Deduction",
+      "aliases": [
+        "telecom",
+        "telecom deduction",
+        "telephone deduction",
+        "phone"
+      ],
+      "category": "deductions",
+      "type": "currency"
+    },
+    {
+      "label": "Rent Deduction",
+      "aliases": [
+        "rent deduction",
+        "quarters deduction",
+        "rent recovery"
+      ],
+      "category": "deductions",
+      "type": "currency"
+    },
+    {
+      "label": "Staff ID",
+      "aliases": [
+        "staff id",
+        "staffid",
+        "employee id",
+        "employeeid",
+        "emp id",
+        "empid",
+        "staff no",
+        "emp no"
+      ],
+      "category": "identity",
+      "type": "text"
+    },
+    {
+      "label": "NATIONAL ID",
+      "aliases": [
+        "national id",
+        "National ID",
+        "NATIONAL ID",
+        "National_ID",
+        "National_Id",
+        "national_id",
+        "NATIONAL ID"
+      ],
+      "category": "identity",
+      "type": "currency"
+    },
+    {
+      "label": "SSNIT Number",
+      "aliases": [
+        "ssnit number",
+        "ssnit no",
+        "ssnitnumber",
+        "social security number",
+        "social security no"
+      ],
+      "category": "identity",
+      "type": "text"
+    },
+    {
+      "label": "ACCOUNT NUMBER",
+      "aliases": [
+        "account number"
+      ],
+      "category": "identity",
+      "type": "currency"
+    },
+    {
+      "label": "Name",
+      "aliases": [
+        "name",
+        "employee name",
+        "fullname",
+        "full name",
+        "staff name",
+        "name of employee"
+      ],
+      "category": "identity",
+      "type": "text"
+    },
+    {
+      "label": "BRANCH",
+      "aliases": [
+        "branch"
+      ],
+      "category": "other",
+      "type": "currency"
+    },
+    {
+      "label": "POSITION",
+      "aliases": [
+        "position"
+      ],
+      "category": "other",
+      "type": "currency"
+    },
+    {
+      "label": "GRADE",
+      "aliases": [
+        "grade"
+      ],
+      "category": "other",
+      "type": "currency"
+    },
+    {
+      "label": "Department",
+      "aliases": [
+        "department",
+        "dept",
+        "division",
+        "unit"
+      ],
+      "category": "identity",
+      "type": "text"
+    },
+    {
+      "label": "NOTCH",
+      "aliases": [
+        "notch"
+      ],
+      "category": "other",
+      "type": "currency"
+    },
+    {
+      "label": "OLD ANNUAL SALARIES",
+      "aliases": [
+        "old annual salaries"
+      ],
+      "category": "earnings",
+      "type": "currency"
+    },
+    {
+      "label": "NEW ANNUAL SALARIES",
+      "aliases": [
+        "new annual salaries"
+      ],
+      "category": "earnings",
+      "type": "currency"
+    },
+    {
+      "label": "MTHLY SALARY",
+      "aliases": [
+        "mthly salary"
+      ],
+      "category": "earnings",
+      "type": "currency"
+    },
+    {
+      "label": "13% SSNIT",
+      "aliases": [
+        "13% ssnit"
+      ],
+      "category": "deductions",
+      "type": "currency"
+    },
+    {
+      "label": "TAX RELIEVE",
+      "aliases": [
+        "tax relieve"
+      ],
+      "category": "allowances",
+      "type": "currency"
+    },
+    {
+      "label": "CHARGABLE INCOME",
+      "aliases": [
+        "chargable income"
+      ],
+      "category": "earnings",
+      "type": "currency"
+    },
+    {
+      "label": "TAX PAID",
+      "aliases": [
+        "tax paid"
+      ],
+      "category": "deductions",
+      "type": "currency"
+    },
+    {
+      "label": "PRUDENTIAL LIFE",
+      "aliases": [
+        "prudential life"
+      ],
+      "category": "deductions",
+      "type": "currency"
+    },
+    {
+      "label": "SHARE DEDUCTIONS",
+      "aliases": [
+        "share deductions"
+      ],
+      "category": "deductions",
+      "type": "currency"
+    },
+    {
+      "label": "ELAC",
+      "aliases": [
+        "elac"
+      ],
+      "category": "deductions",
+      "type": "currency"
+    },
+    {
+      "label": "SANLAM",
+      "aliases": [
+        "sanlam"
+      ],
+      "category": "deductions",
+      "type": "currency"
+    },
+    {
+      "label": "ARBDAS",
+      "aliases": [
+        "arbdas"
+      ],
+      "category": "deductions",
+      "type": "currency"
+    },
+    {
+      "label": "LOCAL LADIES",
+      "aliases": [
+        "local ladies"
+      ],
+      "category": "deductions",
+      "type": "currency"
+    },
+    {
+      "label": "ARBLAS",
+      "aliases": [
+        "arblas"
+      ],
+      "category": "deductions",
+      "type": "currency"
+    },
+    {
+      "label": "STAR ASSURANCE",
+      "aliases": [
+        "star assurance"
+      ],
+      "category": "deductions",
+      "type": "currency"
+    },
+    {
+      "label": "SIC LIFE",
+      "aliases": [
+        "sic life"
+      ],
+      "category": "deductions",
+      "type": "currency"
+    },
+    {
+      "label": "PHOENIX",
+      "aliases": [
+        "phoenix"
+      ],
+      "category": "deductions",
+      "type": "currency"
+    },
+    {
+      "label": "ENTERPRISE PENSION FUND",
+      "aliases": [
+        "enterprise pension fund"
+      ],
+      "category": "deductions",
+      "type": "currency"
+    },
+    {
+      "label": "FUNERAL DEDUCTIONS",
+      "aliases": [
+        "funeral deductions"
+      ],
+      "category": "deductions",
+      "type": "currency"
+    },
+    {
+      "label": "SUB TOTAL",
+      "aliases": [
+        "sub total"
+      ],
+      "category": "other",
+      "type": "currency"
+    },
+    {
+      "label": "G BOY /SEC TNT",
+      "aliases": [
+        "g boy /sec tnt"
+      ],
+      "category": "other",
+      "type": "currency"
+    },
+    {
+      "label": "Names",
+      "aliases": [
+        "Staff Names",
+        "Fullname",
+        "Full Name",
+        "Full_Name",
+        "Names"
+      ],
+      "category": "identity",
+      "type": "currency"
+    }
+  ]
+}

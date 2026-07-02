@@ -126,6 +126,9 @@ class EmployeeDataComparisonRequest(BaseModel):
     keep_digits: int = 5
     tolerance: float = 0.01
     use_ai: bool = True
+    # Optional user-supplied column role overrides:
+    # keys are column labels, values are 'allowance' | 'deduction' | 'earning'
+    column_roles: Optional[Dict[str, str]] = None
 
 
 class AllowanceDeductionRequest(BaseModel):
@@ -355,7 +358,7 @@ async def compare_employee_data(request: EmployeeDataComparisonRequest):
 
         ai_audit = None
         if request.use_ai:
-            ai_audit = AIComparisonService.generate_audit(result)
+            ai_audit = AIComparisonService.generate_audit(result, column_roles=request.column_roles)
 
         files_created = {}
         if len(result['mismatches_df']) > 0:

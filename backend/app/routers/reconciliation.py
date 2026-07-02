@@ -1,7 +1,7 @@
 """
 Reconciliation review endpoints.
 """
-from typing import Optional
+from typing import Optional, List
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
@@ -12,6 +12,13 @@ router = APIRouter()
 
 
 class IssueActionRequest(BaseModel):
+    action: str
+    actor: str = "Payroll Officer"
+    note: Optional[str] = None
+
+
+class BulkIssueActionRequest(BaseModel):
+    issue_ids: List[str]
     action: str
     actor: str = "Payroll Officer"
     note: Optional[str] = None
@@ -42,6 +49,20 @@ async def apply_issue_action(run_id: str, issue_id: str, request: IssueActionReq
         return ReconciliationService.apply_issue_action(
             run_id,
             issue_id,
+            request.action,
+            request.actor,
+            request.note,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@router.post("/{run_id}/issues/bulk/action")
+async def apply_bulk_issue_action(run_id: str, request: BulkIssueActionRequest):
+    try:
+        return ReconciliationService.apply_bulk_issue_action(
+            run_id,
+            request.issue_ids,
             request.action,
             request.actor,
             request.note,
