@@ -179,6 +179,24 @@ class ComparisonService:
         return sample
 
     @staticmethod
+    def _sample_missing_id_rows(df: pd.DataFrame, id_col: str,
+                                name_col: Optional[str] = None,
+                                limit: int = 15) -> List[Dict[str, Any]]:
+        """Return sample rows that have a missing or invalid Staff ID."""
+        if df is None or len(df) == 0:
+            return []
+        sample = []
+        for pos, (_, row) in enumerate(df.head(limit).iterrows(), start=1):
+            item: Dict[str, Any] = {
+                'row_number': pos,
+                'raw_id_value': ComparisonService._json_safe_scalar(row.get(id_col)),
+            }
+            if name_col and name_col in df.columns:
+                item['name'] = ComparisonService._json_safe_scalar(row.get(name_col))
+            sample.append(item)
+        return sample
+
+    @staticmethod
     def _build_employee_data_analytics(mismatches_df: pd.DataFrame,
                                        matched: int,
                                        column_mappings: List[Dict[str, str]]) -> Dict[str, Any]:
@@ -251,11 +269,11 @@ class ComparisonService:
 
     @staticmethod
     def _normalize_comparison_value(value: Any, value_type: str) -> Any:
-        if pd.isna(value):
-            return ''
-
         if value_type in ('currency', 'number', 'numeric'):
             return DataCleaningService.clean_currency_value(value)
+
+        if pd.isna(value):
+            return ''
 
         if value_type == 'grade':
             return DataCleaningService.normalize_grade(value)
@@ -325,6 +343,11 @@ class ComparisonService:
         df2_work[merge_col] = ComparisonService._normalized_id_series(
             df2_work[id_col2], normalize_ids, keep_digits
         )
+
+        # Employees whose ID column could not be normalised (blank, None, non-numeric, etc.)
+        # These are excluded from all matching — surface them so the caller can fix them.
+        missing_id_mask1 = df1_work[merge_col] == ''
+        missing_id_mask2 = df2_work[merge_col] == ''
 
         duplicate_ids_file1 = sorted(
             [x for x in df1_work[df1_work[merge_col].duplicated()][merge_col].unique().tolist() if x != '']
@@ -455,6 +478,14 @@ class ComparisonService:
             'duplicate_ids_file2': len(duplicate_ids_file2),
             'duplicate_id_samples_file1': duplicate_ids_file1[:20],
             'duplicate_id_samples_file2': duplicate_ids_file2[:20],
+            'missing_id_count_file1': int(missing_id_mask1.sum()),
+            'missing_id_count_file2': int(missing_id_mask2.sum()),
+            'missing_id_sample_file1': ComparisonService._sample_missing_id_rows(
+                df1_work[missing_id_mask1], id_col1, name_col1
+            ),
+            'missing_id_sample_file2': ComparisonService._sample_missing_id_rows(
+                df2_work[missing_id_mask2], id_col2, name_col2
+            ),
             'analytics': analytics,
             'mismatches_df': mismatches_clean,
             'only_in_file1_df': only_in_file1_clean,

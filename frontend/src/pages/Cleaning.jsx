@@ -112,6 +112,9 @@ export default function Cleaning() {
   const [overwriteExistingIds, setOverwriteExistingIds] = useState(false);
   const [useFuzzyMatching, setUseFuzzyMatching] = useState(true);
   const [fuzzyThreshold, setFuzzyThreshold] = useState('0.88');
+  const [useFirstLastMatching, setUseFirstLastMatching] = useState(false);
+  const [referenceFirstNameColumn, setReferenceFirstNameColumn] = useState('');
+  const [referenceSurnameColumn, setReferenceSurnameColumn] = useState('');
   const [joiningIds, setJoiningIds] = useState(false);
   const [idJoinResult, setIdJoinResult] = useState(null);
 
@@ -439,6 +442,10 @@ export default function Cleaning() {
       toast.error('Fill all required fields');
       return;
     }
+    if (useFirstLastMatching && (!referenceFirstNameColumn || !referenceSurnameColumn)) {
+      toast.error('Select both first name and surname columns for first+last matching');
+      return;
+    }
     setJoiningIds(true);
     try {
       const result = await enrichIdsByName({
@@ -449,8 +456,12 @@ export default function Cleaning() {
         reference_id_column: referenceIdColumn,
         output_id_column: outputIdColumn || 'Staff ID',
         overwrite_existing: overwriteExistingIds,
-        matching_mode: useFuzzyMatching ? 'fuzzy' : 'exact',
-        fuzzy_threshold: useFuzzyMatching ? Math.max(0, Math.min(1, Number(fuzzyThreshold) || 0.88)) : 1,
+        matching_mode: useFirstLastMatching ? 'first_last' : (useFuzzyMatching ? 'fuzzy' : 'exact'),
+        fuzzy_threshold: (useFuzzyMatching || useFirstLastMatching) ? Math.max(0, Math.min(1, Number(fuzzyThreshold) || 0.88)) : 1,
+        ...(useFirstLastMatching && {
+          reference_first_name_column: referenceFirstNameColumn,
+          reference_surname_column: referenceSurnameColumn,
+        }),
       });
       setIdJoinResult(result);
       toast.success(`IDs enriched: ${result.stats.matched_rows} matched`);
@@ -875,7 +886,8 @@ export default function Cleaning() {
                 </label>
                 <label className="flex items-center gap-1.5 text-[11px] text-slate-700 cursor-pointer">
                   <input type="checkbox" checked={useFuzzyMatching}
-                         onChange={(e) => setUseFuzzyMatching(e.target.checked)} className="w-3 h-3" />
+                         onChange={(e) => { setUseFuzzyMatching(e.target.checked); if (e.target.checked) setUseFirstLastMatching(false); }}
+                         className="w-3 h-3" />
                   <span className="font-medium">Fuzzy name matching</span>
                   <FieldTooltip
                     label="Fuzzy name matching"
@@ -893,13 +905,62 @@ export default function Cleaning() {
                            onChange={(e) => setFuzzyThreshold(e.target.value)} placeholder="0.88" />
                   </FormField>
                 )}
+
+                <label className="flex items-center gap-1.5 text-[11px] text-slate-700 cursor-pointer">
+                  <input type="checkbox" checked={useFirstLastMatching}
+                         onChange={(e) => { setUseFirstLastMatching(e.target.checked); if (e.target.checked) setUseFuzzyMatching(false); }}
+                         className="w-3 h-3" />
+                  <span className="font-medium">Match by first name + surname</span>
+                  <FieldTooltip
+                    label="Match by first name + surname"
+                    text="Select dedicated first-name and surname columns from the reference file. Checks whether both tokens appear in the target's full name — ideal when long names with many middle names cause whole-name fuzzy matching to fail."
+                    placement="right"
+                  />
+                </label>
+                {useFirstLastMatching && (
+                  <>
+                    <FormField
+                      label="First name column (reference)"
+                      tooltip="Column in the reference file containing only the employee's first name."
+                      tooltipPlacement="right"
+                    >
+                      <select value={referenceFirstNameColumn}
+                              onChange={(e) => setReferenceFirstNameColumn(e.target.value)}
+                              className="input text-xs">
+                        <option value="">Select first name column…</option>
+                        {referenceColumns.map(col => <option key={col} value={col}>{col}</option>)}
+                      </select>
+                    </FormField>
+                    <FormField
+                      label="Surname column (reference)"
+                      tooltip="Column in the reference file containing only the employee's surname / last name."
+                      tooltipPlacement="right"
+                    >
+                      <select value={referenceSurnameColumn}
+                              onChange={(e) => setReferenceSurnameColumn(e.target.value)}
+                              className="input text-xs">
+                        <option value="">Select surname column…</option>
+                        {referenceColumns.map(col => <option key={col} value={col}>{col}</option>)}
+                      </select>
+                    </FormField>
+                    <FormField
+                      label="Match threshold"
+                      tooltip="Minimum score (0–1) for both the first name and surname to match against tokens in the target name."
+                      tooltipPlacement="right"
+                    >
+                      <input className="input text-xs" value={fuzzyThreshold}
+                             onChange={(e) => setFuzzyThreshold(e.target.value)} placeholder="0.88" />
+                    </FormField>
+                  </>
+                )}
+
                 <button onClick={handleEnrichIds} disabled={joiningIds}
                         className="btn btn-primary w-full text-xs justify-center disabled:opacity-40">
                   {joiningIds ? 'Matching…' : 'Fill IDs from Reference File'}
                 </button>
                 {idJoinResult?.stats && (
                   <div className="text-[11px] text-slate-600 space-y-0.5 bg-slate-50 rounded p-2">
-                    <p>Matched: {idJoinResult.stats.matched_rows} ({idJoinResult.stats.fuzzy_matched_rows || 0} fuzzy)</p>
+                    <p>Matched: {idJoinResult.stats.matched_rows} ({idJoinResult.stats.exact_matched_rows || 0} exact, {idJoinResult.stats.token_sort_matched_rows || 0} reordered, {idJoinResult.stats.fuzzy_matched_rows || 0} fuzzy, {idJoinResult.stats.first_last_matched_rows || 0} first+last)</p>
                     <p>Unmatched: {idJoinResult.stats.unmatched_rows}</p>
                     <p>Skipped: {idJoinResult.stats.skipped_existing_ids}</p>
                   </div>

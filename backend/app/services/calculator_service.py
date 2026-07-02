@@ -10,6 +10,7 @@ from typing import Any, Dict, List, Optional, Tuple, Callable
 import pandas as pd
 import numpy as np
 
+from app.config import PAYE_BANDS_MONTHLY, SSF_EMPLOYEE_RATE, PF_EMPLOYEE_RATE
 from app.services.cleaning_service import DataCleaningService
 
 
@@ -19,21 +20,18 @@ class PayrollValidator:
 
     Default rules (Ghana standard):
       - Gross = Basic + Allowance
-      - SSNIT (Employee) = Basic × 5%
-      - Provident Fund = Basic × 4.5%
+      - SSNIT (Employee) = Basic × SSF_EMPLOYEE_RATE (5.5%)
+      - Provident Fund = Basic × PF_EMPLOYEE_RATE (5%)
       - Taxable Income = Gross - SSNIT - PF
-      - Income Tax: computed via progressive brackets
+      - Income Tax: computed via progressive PAYE_BANDS_MONTHLY brackets
       - Take Home = Gross - Total Deductions
     """
 
-    # Ghanaian tax brackets for 2024 (monthly)
-    DEFAULT_TAX_BRACKETS = [
-        (0, 490.0, 0.0),          # First GHS 490: 0%
-        (490.0, 730.0, 0.05),     # Next GHS 240: 5%
-        (730.0, 1160.0, 0.10),    # Next GHS 430: 10%
-        (1160.0, 1660.0, 0.175),  # Next GHS 500: 17.5%
-        (1660.0, 5000.0, 0.25),   # Next GHS 3,340: 25%
-        (5000.0, 1000000000, 0.30),  # Above GHS 5,000: 30% (capped)
+    # Build progressive brackets from config so that a rate change only
+    # requires updating config.py (or the PAYE_BANDS_JSON env var).
+    DEFAULT_TAX_BRACKETS: List[Tuple[float, float, float]] = [
+        (b["from"], b["to"] if b["to"] is not None else 1_000_000_000.0, b["rate"])
+        for b in PAYE_BANDS_MONTHLY
     ]
 
     @staticmethod
@@ -52,8 +50,8 @@ class PayrollValidator:
         return diff <= tolerance, expected, diff
 
     @classmethod
-    def validate_ssnit(cls, basic: Any, ssnit: Any, rate: float = 0.05, tolerance: float = 0.01) -> Tuple[bool, float, float]:
-        """Validate SSNIT = Basic × rate."""
+    def validate_ssnit(cls, basic: Any, ssnit: Any, rate: float = SSF_EMPLOYEE_RATE, tolerance: float = 0.01) -> Tuple[bool, float, float]:
+        """Validate SSF Employee = Basic × rate (default: SSF_EMPLOYEE_RATE from config)."""
         b = cls.clean_currency(basic)
         s = cls.clean_currency(ssnit)
         expected = round(b * rate, 2)
@@ -61,8 +59,8 @@ class PayrollValidator:
         return diff <= tolerance, expected, diff
 
     @classmethod
-    def validate_pf(cls, basic: Any, pf: Any, rate: float = 0.045, tolerance: float = 0.01) -> Tuple[bool, float, float]:
-        """Validate PF = Basic × rate."""
+    def validate_pf(cls, basic: Any, pf: Any, rate: float = PF_EMPLOYEE_RATE, tolerance: float = 0.01) -> Tuple[bool, float, float]:
+        """Validate PF = Basic × rate (default: PF_EMPLOYEE_RATE from config)."""
         b = cls.clean_currency(basic)
         p = cls.clean_currency(pf)
         expected = round(b * rate, 2)
@@ -120,8 +118,8 @@ class PayrollValidator:
         cls,
         df: pd.DataFrame,
         column_map: Dict[str, str],
-        ssnit_rate: float = 0.05,
-        pf_rate: float = 0.045,
+        ssnit_rate: float = SSF_EMPLOYEE_RATE,
+        pf_rate: float = PF_EMPLOYEE_RATE,
         tax_brackets: Optional[List[Tuple[float, float, float]]] = None,
         tolerance: float = 0.01,
     ) -> Dict[str, Any]:

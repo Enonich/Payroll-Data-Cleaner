@@ -132,8 +132,41 @@ class FileService:
     
     @classmethod
     def get_dataframe(cls, file_id: str) -> Optional[pd.DataFrame]:
-        """Get DataFrame by file ID"""
-        return cls._dataframes.get(file_id)
+        """Get DataFrame by file ID, falling back to disk if not in memory."""
+        df = cls._dataframes.get(file_id)
+        if df is not None:
+            return df
+        return cls._try_load_from_disk(file_id)
+
+    @classmethod
+    def _try_load_from_disk(cls, file_id: str) -> Optional[pd.DataFrame]:
+        """Reload a file from the uploads directory by file_id.
+        Called automatically when a file is not found in memory
+        (e.g. after a server restart with --reload).
+        Returns the original unprocessed DataFrame or None.
+        """
+        for ext in ('.csv', '.xlsx', '.xls'):
+            filepath = UPLOAD_DIR / f"{file_id}{ext}"
+            if not filepath.exists():
+                continue
+            try:
+                df, encoding = cls.read_file(filepath, filepath.name)
+                cls._files[file_id] = {
+                    'id': file_id,
+                    'filename': filepath.name,
+                    'filepath': str(filepath),
+                    'file_type': ext,
+                    'encoding': encoding,
+                    'size': filepath.stat().st_size,
+                    'columns': df.columns.tolist(),
+                    'row_count': len(df),
+                    'uploaded_at': datetime.now().isoformat(),
+                }
+                cls._dataframes[file_id] = df
+                return df
+            except Exception:
+                pass
+        return None
     
     @classmethod
     def update_dataframe(cls, file_id: str, df: pd.DataFrame) -> bool:

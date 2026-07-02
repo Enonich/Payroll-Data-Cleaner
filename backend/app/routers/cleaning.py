@@ -7,6 +7,7 @@ from typing import List, Optional, Dict, Any, Literal, Tuple
 from pydantic import BaseModel, Field
 from difflib import SequenceMatcher
 import re
+from rapidfuzz import fuzz as rapidfuzz_fuzz
 from app.services.file_service import FileService
 from app.services.cleaning_service import DataCleaningService
 from app.services.step_matching_service import StepMatchingService
@@ -67,8 +68,11 @@ class EnrichIdsByNameRequest(BaseModel):
     reference_id_column: str
     output_id_column: str = "Staff ID"
     overwrite_existing: bool = False
-    matching_mode: Literal["exact", "fuzzy"] = "exact"
+    matching_mode: Literal["exact", "fuzzy", "first_last"] = "exact"
     fuzzy_threshold: float = Field(default=0.88, ge=0.0, le=1.0)
+    # Required when matching_mode == 'first_last'
+    reference_first_name_column: Optional[str] = None
+    reference_surname_column: Optional[str] = None
 
 
 class RowUpdateItem(BaseModel):
@@ -124,8 +128,15 @@ def _normalize_name_for_match(value: Any) -> str:
     return normalized
 
 
+def _token_sort_name(name_key: str) -> str:
+    """Return a token-sorted version of the name so that 'Abdulai Yusif'
+    and 'Yusif Abdulai' collapse to the same key."""
+    return " ".join(sorted(name_key.split()))
+
+
 def _similarity_score(left: str, right: str) -> float:
-    return SequenceMatcher(None, left, right).ratio()
+    # token_sort_ratio is order-agnostic: 'A B' == 'B A'
+    return rapidfuzz_fuzz.token_sort_ratio(left, right) / 100.0
 
 
 def _find_best_fuzzy_match(
@@ -148,6 +159,66 @@ def _find_best_fuzzy_match(
         return None, best_score
 
     return best_name, best_score
+
+
+def _extract_first_last(name_key: str) -> Tuple[str, str]:
+    """Return the first and last tokens of a normalised name key.
+    E.g. 'ABDULAI YUSIF KOFI MENSAH' → ('ABDULAI', 'MENSAH').
+    Single-token names return the same token for both.
+    """
+    tokens = name_key.split()
+    if not tokens:
+        return "", ""
+    if len(tokens) == 1:
+        return tokens[0], tokens[0]
+    return tokens[0], tokens[-1]
+
+
+def _find_best_first_last_match(
+    name_key: str,
+    first_last_entries: List[Tuple[str, str, str]],  # (first, last, id)
+    threshold: float,
+) -> Tuple[Optional[str], Optional[float], Optional[str]]:
+    """
+    For each reference entry score how well its first and last name tokens
+    appear individually among the target's tokens.
+    Score = min(best_token_score_for_first, best_token_score_for_last)
+    so *both* tokens must be present to score high.
+    Returns (matched_id, score, display_label).
+    When two entries tie above the threshold the match is considered
+    ambiguous and (None, score, label) is returned.
+    """
+    if not name_key or not first_last_entries:
+        return None, None, None
+
+    target_tokens = name_key.split()
+    if not target_tokens:
+        return None, None, None
+
+    best_id: Optional[str] = None
+    best_score = 0.0
+    best_label: Optional[str] = None
+    is_ambiguous = False
+
+    for ref_first, ref_last, ref_id in first_last_entries:
+        if not ref_first:
+            continue
+        score_first = max(rapidfuzz_fuzz.ratio(ref_first, t) / 100.0 for t in target_tokens)
+        score_last = max(rapidfuzz_fuzz.ratio(ref_last, t) / 100.0 for t in target_tokens)
+        score = min(score_first, score_last)
+
+        if score > best_score:
+            best_score = score
+            best_id = ref_id
+            best_label = f"{ref_first} … {ref_last}"
+            is_ambiguous = False
+        elif score == best_score and score >= threshold and ref_id != best_id:
+            is_ambiguous = True
+
+    if best_id is None or best_score < threshold or is_ambiguous:
+        return None, best_score, best_label
+
+    return best_id, best_score, best_label
 
 
 def _build_eval_expression(formula: str, columns: List[str]) -> str:
@@ -374,6 +445,22 @@ async def enrich_ids_by_name(request: EnrichIdsByNameRequest):
             details.append(f"Reference file missing columns: {missing_reference}")
         raise HTTPException(status_code=400, detail="; ".join(details))
 
+    if request.matching_mode == "first_last":
+        if not request.reference_first_name_column or not request.reference_surname_column:
+            raise HTTPException(
+                status_code=400,
+                detail="'first_last' mode requires both reference_first_name_column and reference_surname_column.",
+            )
+        missing_fl = [
+            c for c in [request.reference_first_name_column, request.reference_surname_column]
+            if c not in reference_df.columns
+        ]
+        if missing_fl:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Reference file missing first/last name columns: {missing_fl}",
+            )
+
     try:
         result_df = target_df.copy()
         if request.output_id_column not in result_df.columns:
@@ -406,16 +493,53 @@ async def enrich_ids_by_name(request: EnrichIdsByNameRequest):
 
             reference_map[name_key] = id_value
 
+        # Build a secondary token-sorted map so that reversed names
+        # (e.g. 'Abdulai Yusif' vs 'Yusif Abdulai') still match exactly.
+        token_sort_map: Dict[str, str] = {}
+        token_sort_conflicts: set = set()
+        for _name_key, _id_value in reference_map.items():
+            ts_key = _token_sort_name(_name_key)
+            if ts_key in token_sort_conflicts:
+                continue
+            if ts_key in token_sort_map and token_sort_map[ts_key] != _id_value:
+                token_sort_conflicts.add(ts_key)
+                token_sort_map.pop(ts_key, None)
+            else:
+                token_sort_map[ts_key] = _id_value
+
         reference_names = list(reference_map.keys())
+
+        # Build first+last entries for 'first_last' matching mode.
+        # Uses the dedicated first-name and surname columns selected by the
+        # user — more reliable than extracting tokens from the full name.
+        first_last_entries: List[Tuple[str, str, str]] = []
+        if request.matching_mode == "first_last":
+            for _, ref_row in reference_df.iterrows():
+                raw_fl_first = ref_row[request.reference_first_name_column]
+                raw_fl_last  = ref_row[request.reference_surname_column]
+                raw_fl_id    = ref_row[request.reference_id_column]
+                if hasattr(raw_fl_first, 'item'): raw_fl_first = raw_fl_first.item()
+                if hasattr(raw_fl_last,  'item'): raw_fl_last  = raw_fl_last.item()
+                if hasattr(raw_fl_id,    'item'): raw_fl_id    = raw_fl_id.item()
+                fl_first = _normalize_name_for_match(raw_fl_first)
+                fl_last  = _normalize_name_for_match(raw_fl_last)
+                fl_id    = DataCleaningService.normalize_staff_id(raw_fl_id)
+                if fl_first and fl_last and fl_id:
+                    first_last_entries.append((fl_first, fl_last, fl_id))
+
         fuzzy_cache: Dict[str, Tuple[Optional[str], Optional[float]]] = {}
+        first_last_cache: Dict[str, Tuple[Optional[str], Optional[float], Optional[str]]] = {}
 
         matched = 0
         exact_matched = 0
+        token_sort_matched = 0
         fuzzy_matched = 0
+        first_last_matched = 0
         skipped_existing = 0
         unmatched = 0
         unmatched_samples = []
         fuzzy_match_samples = []
+        first_last_match_samples = []
 
         for row_index, row in result_df.iterrows():
             # Explicitly convert pandas/numpy values to Python scalars
@@ -446,6 +570,38 @@ async def enrich_ids_by_name(request: EnrichIdsByNameRequest):
                 exact_matched += 1
                 continue
 
+            # Token-sort match: catches reversed names like 'Yusif Abdulai' vs 'Abdulai Yusif'
+            ts_key = _token_sort_name(name_key)
+            matched_id = token_sort_map.get(ts_key)
+            if matched_id:
+                result_df.at[row_index, request.output_id_column] = matched_id
+                matched += 1
+                token_sort_matched += 1
+                continue
+
+            # First+last match: checks whether the reference's first and surname
+            # tokens both appear in the target's full name (handles middle-name
+            # clutter or extra tokens that fool whole-name fuzzy matching).
+            if request.matching_mode == "first_last":
+                if name_key not in first_last_cache:
+                    first_last_cache[name_key] = _find_best_first_last_match(
+                        name_key,
+                        first_last_entries,
+                        request.fuzzy_threshold,
+                    )
+                fl_id, fl_score, fl_label = first_last_cache[name_key]
+                if fl_id:
+                    result_df.at[row_index, request.output_id_column] = fl_id
+                    matched += 1
+                    first_last_matched += 1
+                    if len(first_last_match_samples) < 15:
+                        first_last_match_samples.append({
+                            "target_name": str(raw_target_name),
+                            "matched_first_last": fl_label,
+                            "score": round(float(fl_score or 0.0), 4),
+                        })
+                    continue
+
             if request.matching_mode == "fuzzy":
                 if name_key not in fuzzy_cache:
                     fuzzy_cache[name_key] = _find_best_fuzzy_match(
@@ -475,6 +631,14 @@ async def enrich_ids_by_name(request: EnrichIdsByNameRequest):
                         "closest_reference_name": best_name,
                         "score": round(float(best_score or 0.0), 4),
                     })
+            elif request.matching_mode == "first_last" and name_key in first_last_cache:
+                _, fl_score, fl_label = first_last_cache[name_key]
+                if len(unmatched_samples) < 15:
+                    unmatched_samples.append({
+                        "target_name": str(raw_target_name),
+                        "closest_first_last": fl_label,
+                        "score": round(float(fl_score or 0.0), 4),
+                    })
             else:
                 unmatched += 1
                 if len(unmatched_samples) < 15:
@@ -493,7 +657,9 @@ async def enrich_ids_by_name(request: EnrichIdsByNameRequest):
                 "total_target_rows": len(result_df),
                 "matched_rows": matched,
                 "exact_matched_rows": exact_matched,
+                "token_sort_matched_rows": token_sort_matched,
                 "fuzzy_matched_rows": fuzzy_matched,
+                "first_last_matched_rows": first_last_matched,
                 "skipped_existing_ids": skipped_existing,
                 "unmatched_rows": unmatched,
                 "reference_unique_names": len(reference_map),
@@ -503,6 +669,7 @@ async def enrich_ids_by_name(request: EnrichIdsByNameRequest):
             },
             "unmatched_name_samples": unmatched_samples,
             "fuzzy_match_samples": fuzzy_match_samples,
+            "first_last_match_samples": first_last_match_samples,
             "preview": preview,
         }
     except Exception as e:

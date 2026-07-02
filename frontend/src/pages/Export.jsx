@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react';
 import toast from 'react-hot-toast';
 import { Download, FileSpreadsheet } from 'lucide-react';
-import { listFiles, getFileStats, downloadCsv, downloadExcel } from '../services/api';
+import api, { listFiles, getFileStats } from '../services/api';
 
 export default function Export() {
   const [files, setFiles] = useState([]);
@@ -40,18 +40,45 @@ export default function Export() {
     }
   };
 
-  const handleDownload = (format) => {
+  const handleDownload = async (format) => {
     if (!selectedFile) {
       toast.error('Please select a file');
       return;
     }
-    
-    const file = files.find(f => f.id === selectedFile);
-    const url = format === 'csv' 
-      ? downloadCsv(selectedFile, file?.filename)
-      : downloadExcel(selectedFile, file?.filename);
-    window.open(url, '_blank');
-    toast.success(`Downloading as ${format.toUpperCase()}`);
+
+    try {
+      const endpoint = format === 'csv'
+        ? `/export/${selectedFile}/csv`
+        : `/export/${selectedFile}/excel`;
+
+      const response = await api.get(endpoint, { responseType: 'blob' });
+
+      // Derive a clean filename with the correct extension
+      const file = files.find(f => f.id === selectedFile);
+      const base = file?.filename?.replace(/\.[^.]+$/, '') ?? 'export';
+      const ext  = format === 'csv' ? 'csv' : 'xlsx';
+      const filename = `${base}.${ext}`;
+
+      const blobUrl = window.URL.createObjectURL(new Blob([response.data]));
+      const link = document.createElement('a');
+      link.href = blobUrl;
+      link.setAttribute('download', filename);
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      window.URL.revokeObjectURL(blobUrl);
+
+      toast.success(`Downloaded as ${format.toUpperCase()}`);
+    } catch (error) {
+      // When responseType is 'blob', error bodies come back as Blobs too
+      if (error.response?.data instanceof Blob) {
+        const text = await error.response.data.text();
+        try { toast.error(JSON.parse(text).detail || 'Download failed'); }
+        catch { toast.error('Download failed'); }
+      } else {
+        toast.error(error.response?.data?.detail || 'Download failed');
+      }
+    }
   };
 
   const formatNumber = (num) => {

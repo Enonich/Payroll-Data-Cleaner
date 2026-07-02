@@ -9,7 +9,8 @@ import pandas as pd
 from langchain_ollama import ChatOllama
 from langchain_core.messages import HumanMessage, SystemMessage
 
-from app.config import OLLAMA_MODEL, OLLAMA_BASE_URL
+from app.config import OLLAMA_MODEL, OLLAMA_BASE_URL, PAYE_BANDS_MONTHLY
+from app.services.deterministic_audit_service import DeterministicAuditService
 
 logger = logging.getLogger(__name__)
 
@@ -22,89 +23,66 @@ MAX_MISMATCH_ROWS = 60        # rows sent to model; trimmed to protect context w
 TOKEN_LIMIT_ESTIMATE = 7_000  # rough token ceiling (~4 chars per token)
 
 # ---------------------------------------------------------------------------
-# System prompt — deep Ghanaian payroll domain context
+# System prompt — focused Explanation Engine role
+#
+# Architecture note (AI_Int_Issues.md):
+#   "Let code discover the facts, and let the LLM explain, prioritise, and
+#    guide the user through those facts."
+#
+# The deterministic audit service pre-computes every violation with full
+# evidence.  The AI's job is ONLY to:
+#   1. Explain each pre-computed violation in plain language.
+#   2. Assign/confirm severity and add a recommended action where missing.
+#   3. Synthesise an executive summary and risk level.
+#   4. Note any patterns or correlations across findings.
+#
+# The AI must NOT re-compute calculations, search for new issues, or
+# speculate beyond what the evidence packs show.
 # ---------------------------------------------------------------------------
 SYSTEM_PROMPT = """
 You are a senior payroll auditor specialising in Ghanaian public and private sector
-payroll reconciliation. You have deep knowledge of:
+payroll. Your role in this system is that of an EXPLANATION ENGINE — not a detector.
 
-STATUTORY DEDUCTIONS (Ghana):
-- SSNIT Tier 1: 13.5% of basic salary (employer contribution).
-- SSNIT Tier 2 (MOP): 5% of basic salary (employer contribution, goes to occupational pension fund).
-- SSF Employee (5.5%): employee's Social Security Fund contribution.
-- SSF Employer (13%): employer's Social Security Fund contribution.
-- Provident Fund Employee (5%): staff voluntary PF contribution.
-- Provident Fund Employer (7.5%): employer PF contribution.
-- Total PF (12%): sum of employee 5% + employer 7.5%.
-- Income Tax / PAYE: Ghana Revenue Authority graduated tax bands:
-    0% on first GHS 402/month, 5% on next GHS 110, 10% on next GHS 130,
-    17.5% on next GHS 3,000, 25% on next GHS 16,000, 30% on next GHS 80,000,
-    35% on excess above GHS 99,772/month (figures subject to GRA annual revision).
-- 3% ICU/PMSU: Industrial & Commercial Workers Union or Public & Municipal Services Union dues.
-- Welfare Dues: union/staff welfare fund deduction.
-- Tax Relief: personal and/or marriage relief applied before PAYE calculation.
-- Taxable Income: Annual Salary minus applicable reliefs, used as base for PAYE.
+Our audit engine has already run all deterministic checks (duplicate detection,
+formula validation, presence checks, rate verification) and produced structured
+evidence packs for every violation it found.
 
-ALLOWANCES (common in Ghanaian payroll):
-Transportation, Enhancement, Furnishing, Rent, Vehicle & Fuel, Car Maintenance,
-Security, Signing Allowance, Utility, Responsibility, Risk, Lunch, General Manager
-Driver Allowance, Entertainment, Acting Allowance, Motorbike Fuel, Motor Maintenance.
+Your task is to:
+1. Transform each evidence pack into a clear, plain-language finding for the
+   payroll officer reviewing the data.
+2. Confirm or refine the severity of each finding based on its context.
+3. Provide a specific, actionable recommended_action for the payroll team.
+4. Write a concise executive summary that synthesises all findings.
+5. Assign an overall risk_level (low | medium | high | critical).
+6. Note any patterns or correlations across findings (e.g. "allowance changes
+   coincide with the same employees as the large salary changes").
 
-CROSS-FIELD RULES YOU MUST ENFORCE:
-1. Net Pay = Basic Salary + Total Allowance - SSF Employee (5.5%) - Total PF Employee (5%)
-   - ICU/PMSU (3%) - Welfare Dues - Income Tax (PAYE). Flag if Net Pay deviates
-   by more than GHS 1 from this formula.
-2. TIER 1 (13.5%) and TIER 2 MOP (5%) are EMPLOYER costs — they must NOT appear
-   as deductions from Net Pay. Flag any case where Net Pay has been reduced by these.
-3. Annual Salary / 12 should equal Basic Salary (monthly). Flag discrepancies > GHS 1.
-4. NEW BASIC should match Basic Salary unless there is an active salary review —
-   flag any unexplained difference.
-5. 16% column typically represents 16% of Basic (possibly a special allowance or
-   contribution). Flag if value is inconsistent with 16% × Basic.
-6. Total Allowance must equal the sum of all individual allowance columns.
-   Flag any mismatch > GHS 1.
-7. Taxable Income = Annual Salary - Tax Relief (annualised). Flag deviations.
-8. PAYE must correspond to the correct GRA tax band for the Taxable Income.
-   Flag any employee whose PAYE appears too low or too high for their income band.
-9. SSF Employee (5.5%) = 5.5% × Basic Salary. Flag deviations > GHS 1.
-10. Total PF (12%) = Employee PF (5%) + Employer PF (7.5%). Flag if these do not sum.
-
-YOUR TASK:
-Analyse the supplied payroll comparison payload — which contrasts two payroll runs
-or two files — and identify ALL of the following:
-  A. Employees present in one file but missing in the other (joiners / leavers / ID mismatches).
-  B. Salary or allowance changes that are unusually large (>20% shift with no explanation).
-  C. Statutory deduction amounts that violate the cross-field rules above.
-  D. PAYE amounts inconsistent with GRA tax bands for the declared taxable income.
-  E. Net Pay figures that do not reconcile with the formula in rule 1 above.
-  F. Duplicate employee IDs or account numbers within either file.
-  G. Name mismatches for the same ID (possible data entry errors or fraud signals).
-  H. Zero or blank values in critical fields (Basic Salary, Net Pay, Account Number).
-  I. Negative values in fields that must always be positive (Net Pay, SSNIT contributions).
-  J. Allowances that changed between runs without a corresponding salary change.
-
-STRICT OUTPUT RULES:
-- Return ONLY valid JSON. No preamble, no explanation outside the JSON, no markdown fences.
-- Every "evidence" field must quote actual values, field names, employee identifiers,
-  or amounts from the payload. Do NOT invent figures, names, or causes.
-- Do NOT speculate about why a difference exists — only report what the data shows.
-- If a finding cannot be supported by specific data in the payload, omit it entirely.
-- If there are no issues in a category, omit that category from key_findings.
-- Be specific: "Employee A123 Net Pay changed from GHS 4,200 to GHS 3,950 (-GHS 250)"
-  is a finding. "Some employees had Net Pay changes" is not.
+STRICT RULES:
+- Base every finding ONLY on the evidence packs provided — do NOT invent new issues.
+- Quote actual values, employee IDs, and field names from the evidence.
+- Do NOT re-calculate formulas — the evidence packs already contain the computed
+  expected/actual values.
+- Do NOT speculate about causes not supported by the evidence.
+- If two evidence packs describe the same employees, note the correlation but
+  count them as separate findings.
+- Omit the statutory_compliance fields only if you have no evidence from the
+  packs to populate them; otherwise set them based on the evidence provided.
 """
 
 # ---------------------------------------------------------------------------
-# Human prompt template
+# Human prompt template — receives pre-computed evidence packs
 # ---------------------------------------------------------------------------
 HUMAN_PROMPT_TEMPLATE = """
-Analyse the payroll comparison payload below and return a JSON object with exactly
-this shape — no extra keys, no missing keys:
+You are receiving the output of our deterministic payroll audit engine.
+All violations below have confidence = 100 (computed by Python, not guessed).
+Your task is to explain each finding and produce a structured JSON report.
+
+Return ONLY valid JSON with exactly this shape — no preamble, no markdown fences:
 
 {{
   "executive_summary": "2-4 sentences. State total employees compared, how many had
-    differences, overall risk level, and the single most critical finding. Be specific
-    with numbers.",
+    differences, overall risk level, and the single most critical finding. Reference
+    specific numbers from the evidence packs.",
 
   "risk_level": "low | medium | high | critical",
 
@@ -113,33 +91,44 @@ this shape — no extra keys, no missing keys:
       "category": "one of: net_pay | paye | ssnit | provident_fund | allowances |
         presence | duplicates | names | account_numbers | salary | cross_field | data_quality",
       "severity": "low | medium | high | critical",
-      "finding": "Precise description of the issue. Name specific employees or IDs
-        where possible. Quote before/after amounts.",
-      "evidence": "Exact values, field names, row counts, or amounts from the payload
-        that support this finding. If quoting an amount, include the currency (GHS).",
-      "affected_count": <integer — number of employees or rows affected, or 0 if unknown>,
-      "recommended_action": "One specific, actionable next step for the HR/payroll team."
+      "confidence": <integer 0-100 — use the confidence from the evidence pack, or your
+        own assessment for any observation you add>,
+      "finding": "Plain-language explanation of this issue for the payroll officer.
+        Name specific employees or IDs where possible. Quote before/after amounts.",
+      "evidence": "Exact values, field names, row counts, or amounts from the evidence
+        pack that support this finding. Always include GHS currency where applicable.",
+      "affected_count": <integer — number of employees or rows affected>,
+      "recommended_action": "One specific, actionable next step referencing the evidence."
     }}
   ],
 
   "statutory_compliance": {{
-    "ssnit_ok": <true | false — are all SSNIT Tier 1 and Tier 2 amounts consistent?>,
-    "paye_ok": <true | false — do all PAYE amounts appear consistent with GRA bands?>,
-    "net_pay_ok": <true | false — do all Net Pay figures reconcile with the formula?>,
-    "ssf_ok": <true | false — are all SSF employee deductions correct at 5.5%?>,
-    "notes": "Any statutory compliance observations not captured in key_findings."
+    "ssnit_ok": <true | false | null — null if no SSF/SSNIT evidence was provided>,
+    "paye_ok": <true | false | null — null if no PAYE evidence was provided>,
+    "net_pay_ok": <true | false | null — null if no net-pay evidence was provided>,
+    "ssf_ok": <true | false | null — null if no SSF-rate evidence was provided>,
+    "notes": "Any statutory compliance observations from the evidence packs."
   }},
 
   "recommended_actions": [
-    "Prioritised list of next steps for the payroll team before uploading to the HR system.
-     Each item should be specific and actionable, referencing actual findings above."
+    "Prioritised list of next steps for the payroll team, each referencing specific
+     findings above. Most critical actions first."
   ]
 }}
 
 {sample_note}
 
-Comparison payload:
-{payload}
+Current PAYE bands (GRA — injected from application config, not hardcoded):
+{paye_bands}
+
+Comparison summary:
+{comparison_summary}
+
+Pre-computed evidence packs (violations found by Python audit engine):
+{evidence_packs}
+
+Additional mismatch data:
+{additional_payload}
 """
 
 
@@ -282,42 +271,32 @@ class AIComparisonService:
     @classmethod
     def build_payload(
         cls, comparison_result: Dict[str, Any]
-    ) -> tuple[Dict[str, Any], str]:
+    ) -> tuple[Dict[str, Any], str, List[Dict[str, Any]]]:
         """
-        Build the data payload sent to the model and a sample note explaining
-        any trimming applied to protect the context window.
+        Build the data payload sent to the model.
+
+        Returns:
+          - additional_payload: summary + analytics + mismatch sample (context window trimmed)
+          - sample_note: string explaining any trimming applied
+          - evidence_packs: pre-computed violations from DeterministicAuditService
         """
+        # 1. Run deterministic checks first — these are facts, not guesses
+        evidence_packs = DeterministicAuditService.build_evidence_packs(comparison_result)
+
+        # 2. Build the supporting context payload (summary + analytics + mismatch sample)
         total_mismatches = cls._total_rows(comparison_result.get("mismatches_df"))
         mismatch_sample = cls._records(
             comparison_result.get("mismatches_df"), MAX_MISMATCH_ROWS
         )
 
         sample_note = (
-            f"NOTE: The top_mismatches list is a representative sample of "
-            f"{len(mismatch_sample)} rows out of {total_mismatches} total mismatched "
-            f"records. Base your 'affected_count' on the summary counts, not the sample size."
+            f"NOTE: The additional_mismatches list shows {len(mismatch_sample)} of "
+            f"{total_mismatches} total mismatched rows. Use summary counts for totals."
             if total_mismatches > MAX_MISMATCH_ROWS
             else ""
         )
 
-        payload: Dict[str, Any] = {
-            "summary": {
-                "total_file1": comparison_result.get("total_file1"),
-                "total_file2": comparison_result.get("total_file2"),
-                "matched": comparison_result.get("matched"),
-                "only_in_file1": comparison_result.get("only_in_file1"),
-                "only_in_file2": comparison_result.get("only_in_file2"),
-                "employees_with_differences": comparison_result.get(
-                    "employees_with_differences"
-                ),
-                "employees_without_differences": comparison_result.get(
-                    "employees_without_differences"
-                ),
-                "field_differences": comparison_result.get("field_differences"),
-                "duplicate_ids_file1": comparison_result.get("duplicate_ids_file1"),
-                "duplicate_ids_file2": comparison_result.get("duplicate_ids_file2"),
-                "total_mismatched_rows": total_mismatches,
-            },
+        additional_payload: Dict[str, Any] = {
             "analytics": comparison_result.get("analytics", {}),
             "duplicate_id_samples": {
                 "file1": (comparison_result.get("duplicate_id_samples_file1") or [])[:20],
@@ -330,20 +309,20 @@ class AIComparisonService:
             "top_mismatches": mismatch_sample,
         }
 
-        # Trim payload further if it still exceeds token budget
-        payload_str = json.dumps(payload, default=str)
+        # Trim mismatch sample if combined payload is too large
+        payload_str = json.dumps(additional_payload, default=str)
         if cls._estimate_tokens(payload_str) > TOKEN_LIMIT_ESTIMATE:
             logger.warning(
                 "Payload too large (~%d tokens). Trimming top_mismatches to 30 rows.",
                 cls._estimate_tokens(payload_str),
             )
-            payload["top_mismatches"] = mismatch_sample[:30]
+            additional_payload["top_mismatches"] = mismatch_sample[:30]
             sample_note = (
-                f"NOTE: Payload was trimmed for context window. Showing 30 of "
-                f"{total_mismatches} mismatched rows. Use summary counts for totals."
+                f"NOTE: Payload trimmed for context window. Showing 30 of "
+                f"{total_mismatches} mismatched rows."
             )
 
-        return payload, sample_note
+        return additional_payload, sample_note, evidence_packs
 
     # ── main entry point ──────────────────────────────────────────────────────
 
@@ -352,14 +331,16 @@ class AIComparisonService:
         """
         Run the AI audit against a payroll comparison result.
 
+        Architecture:
+          1. DeterministicAuditService pre-computes all violations (Python, 100% reliable).
+          2. Evidence packs + PAYE bands are injected into the prompt.
+          3. AI only explains and synthesises — it does not search for issues.
+
         Returns a structured dict with:
-          - executive_summary
-          - risk_level
-          - key_findings  (with per-finding recommended_action)
-          - statutory_compliance
-          - recommended_actions  (prioritised list)
+          - executive_summary, risk_level, key_findings (with confidence + recommended_action),
+            statutory_compliance, recommended_actions
+          - deterministic_violations: raw evidence packs for downstream use
         """
-        # Guard: nothing matched — return a meaningful no-match report immediately
         matched = int(comparison_result.get("matched", 0) or 0)
         total_f1 = int(comparison_result.get("total_file1", 0) or 0)
         total_f2 = int(comparison_result.get("total_file2", 0) or 0)
@@ -367,17 +348,40 @@ class AIComparisonService:
         if matched == 0 and (total_f1 > 0 or total_f2 > 0):
             return cls._no_match_report(comparison_result)
 
-        # Build payload
+        # Build payload (runs deterministic checks first)
         try:
-            payload, sample_note = cls.build_payload(comparison_result)
+            additional_payload, sample_note, evidence_packs = cls.build_payload(comparison_result)
         except Exception as exc:
             logger.error("Failed to build AI audit payload: %s", exc, exc_info=True)
             return cls._fallback_report(f"Payload build error: {exc}")
 
+        # Comparison summary (small, always sent)
+        comparison_summary = {
+            "total_file1": total_f1,
+            "total_file2": total_f2,
+            "matched": matched,
+            "only_in_file1": comparison_result.get("only_in_file1"),
+            "only_in_file2": comparison_result.get("only_in_file2"),
+            "employees_with_differences": comparison_result.get("employees_with_differences"),
+            "employees_without_differences": comparison_result.get("employees_without_differences"),
+            "field_differences": comparison_result.get("field_differences"),
+            "duplicate_ids_file1": comparison_result.get("duplicate_ids_file1"),
+            "duplicate_ids_file2": comparison_result.get("duplicate_ids_file2"),
+            "deterministic_violation_summary": DeterministicAuditService.summarise(evidence_packs),
+        }
+
+        # Format PAYE bands for the prompt (from config — not hardcoded)
+        paye_bands_text = "\n".join(
+            f"  {b['label']}" for b in PAYE_BANDS_MONTHLY if "label" in b
+        )
+
         # Assemble prompt
         human_prompt = HUMAN_PROMPT_TEMPLATE.format(
             sample_note=sample_note,
-            payload=json.dumps(payload, indent=2, default=str),
+            paye_bands=paye_bands_text,
+            comparison_summary=json.dumps(comparison_summary, indent=2, default=str),
+            evidence_packs=json.dumps(evidence_packs, indent=2, default=str),
+            additional_payload=json.dumps(additional_payload, indent=2, default=str),
         )
 
         # Invoke model
@@ -421,35 +425,50 @@ class AIComparisonService:
             parsed = cls._extract_json(raw_content)
         except ValueError as exc:
             logger.error("JSON extraction failed: %s", exc)
+            return cls._fallback_report(f"Model returned unparseable output: {exc}")
+
+        # Validate that the model actually filled the required fields.
+        # Small/quantized models sometimes return a valid but near-empty JSON
+        # object that doesn't satisfy the schema.
+        _VALID_RISK_LEVELS = {"low", "medium", "high", "critical"}
+        missing_summary = not parsed.get("executive_summary") or not str(parsed["executive_summary"]).strip()
+        invalid_risk = str(parsed.get("risk_level", "")).lower() not in _VALID_RISK_LEVELS
+
+        if missing_summary or invalid_risk:
+            logger.warning(
+                "Model '%s' returned an incomplete schema response. "
+                "missing_summary=%s, invalid_risk=%s. Raw keys returned: %s",
+                OLLAMA_MODEL,
+                missing_summary,
+                invalid_risk,
+                list(parsed.keys()),
+            )
             return cls._fallback_report(
-                f"Model returned unparseable output: {exc}"
+                f"Model '{OLLAMA_MODEL}' returned an incomplete response — it did not "
+                f"populate the required 'executive_summary' and/or 'risk_level' fields. "
+                f"This usually means the model is too small to follow the required JSON "
+                f"schema. Try a larger model (e.g. llama3, mistral, gemma3:4b)."
             )
 
-        # Validate required top-level keys are present
-        required_keys = {
-            "executive_summary", "risk_level", "key_findings",
-            "statutory_compliance", "recommended_actions",
-        }
-        missing_keys = required_keys - set(parsed.keys())
-        if missing_keys:
-            logger.warning("Model response missing keys: %s", missing_keys)
-            # Fill in missing keys with safe defaults rather than failing entirely
-            parsed.setdefault("executive_summary", "AI summary unavailable.")
-            parsed.setdefault("risk_level", "unknown")
-            parsed.setdefault("key_findings", [])
-            parsed.setdefault("statutory_compliance", {
-                "ssnit_ok": None, "paye_ok": None,
-                "net_pay_ok": None, "ssf_ok": None, "notes": "",
-            })
-            parsed.setdefault("recommended_actions", [])
+        # Fill any missing optional top-level keys with safe defaults
+        parsed.setdefault("key_findings", [])
+        parsed.setdefault("statutory_compliance", {
+            "ssnit_ok": None, "paye_ok": None,
+            "net_pay_ok": None, "ssf_ok": None, "notes": "",
+        })
+        parsed.setdefault("recommended_actions", [])
 
         return {
             "enabled": True,
             "available": True,
             "model": OLLAMA_MODEL,
-            "executive_summary": parsed.get("executive_summary", ""),
-            "risk_level": parsed.get("risk_level", "unknown"),
-            "key_findings": parsed.get("key_findings", []),
-            "statutory_compliance": parsed.get("statutory_compliance", {}),
-            "recommended_actions": parsed.get("recommended_actions", []),
+            "executive_summary": parsed["executive_summary"],
+            "risk_level": parsed["risk_level"],
+            "key_findings": parsed["key_findings"],
+            "statutory_compliance": parsed["statutory_compliance"],
+            "recommended_actions": parsed["recommended_actions"],
+            # Include raw evidence packs so the API consumer can use them without
+            # re-parsing the AI narrative.
+            "deterministic_violations": evidence_packs,
+            "deterministic_summary": DeterministicAuditService.summarise(evidence_packs),
         }

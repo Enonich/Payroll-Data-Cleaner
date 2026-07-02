@@ -56,62 +56,56 @@ async def export_file(request: ExportRequest):
 
 
 @router.get("/{file_id}/csv")
-async def download_as_csv(file_id: str, filename: Optional[str] = None):
+async def download_as_csv(file_id: str):
     """
     Download a file as CSV
     """
     df = FileService.get_dataframe(file_id)
     if df is None:
         raise HTTPException(status_code=404, detail="File not found")
-    
+
     file_info = FileService.get_file_info(file_id)
-    
+
     # Generate CSV in memory
     buffer = io.StringIO()
     df.to_csv(buffer, index=False)
     buffer.seek(0)
-    
-    if filename is None:
-        original_name = file_info.get('filename', 'export')
-        if '.' in original_name:
-            filename = original_name.rsplit('.', 1)[0] + '.csv'
-        else:
-            filename = original_name + '.csv'
-    
+
+    original_name = (file_info or {}).get('filename', 'export')
+    base = original_name.rsplit('.', 1)[0] if '.' in original_name else original_name
+    filename = f"{base}.csv"
+
     return StreamingResponse(
         iter([buffer.getvalue()]),
         media_type="text/csv",
-        headers={"Content-Disposition": f"attachment; filename={filename}"}
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
 
 
 @router.get("/{file_id}/excel")
-async def download_as_excel(file_id: str, filename: Optional[str] = None):
+async def download_as_excel(file_id: str):
     """
     Download a file as Excel
     """
     df = FileService.get_dataframe(file_id)
     if df is None:
         raise HTTPException(status_code=404, detail="File not found")
-    
+
     file_info = FileService.get_file_info(file_id)
-    
+
     # Generate Excel in memory
     buffer = io.BytesIO()
     df.to_excel(buffer, index=False, engine='openpyxl')
     buffer.seek(0)
-    
-    if filename is None:
-        original_name = file_info.get('filename', 'export')
-        if '.' in original_name:
-            filename = original_name.rsplit('.', 1)[0] + '.xlsx'
-        else:
-            filename = original_name + '.xlsx'
-    
+
+    original_name = (file_info or {}).get('filename', 'export')
+    base = original_name.rsplit('.', 1)[0] if '.' in original_name else original_name
+    filename = f"{base}.xlsx"
+
     return StreamingResponse(
         iter([buffer.getvalue()]),
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        headers={"Content-Disposition": f"attachment; filename={filename}"}
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
 
 

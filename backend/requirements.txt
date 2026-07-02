@@ -12,3 +12,4 @@ aiofiles
 ollama
 langchain-ollama
 langchain-core
+rapidfuzz
