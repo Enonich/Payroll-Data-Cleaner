@@ -18,6 +18,70 @@ class FileService:
     # In-memory store for file metadata and dataframes
     _files: Dict[str, Dict] = {}
     _dataframes: Dict[str, pd.DataFrame] = {}
+    _catalog_path = UPLOAD_DIR / "file_catalog.json"
+    _retained_upload_count = 2
+
+    @classmethod
+    def _persist_catalog(cls) -> None:
+        catalog = {
+            file_id: metadata
+            for file_id, metadata in cls._files.items()
+            if not metadata.get('is_generated', False)
+        }
+        temporary_path = cls._catalog_path.with_suffix('.tmp')
+        with open(temporary_path, 'w', encoding='utf-8') as catalog_file:
+            json.dump(catalog, catalog_file, indent=2)
+        temporary_path.replace(cls._catalog_path)
+
+    @classmethod
+    def load_persisted_files(cls) -> None:
+        """Restore uploaded-file metadata after a server restart."""
+        catalog = {}
+        if cls._catalog_path.exists():
+            try:
+                with open(cls._catalog_path, encoding='utf-8') as catalog_file:
+                    catalog = json.load(catalog_file)
+            except (OSError, json.JSONDecodeError):
+                catalog = {}
+
+        for file_id, metadata in catalog.items():
+            filepath = Path(metadata.get('filepath', ''))
+            if filepath.exists() and filepath.suffix.lower() in ALLOWED_EXTENSIONS:
+                cls._files[file_id] = metadata
+
+        # Files uploaded before the catalog existed have no original filename metadata.
+        for filepath in UPLOAD_DIR.iterdir():
+            if filepath.suffix.lower() not in ALLOWED_EXTENSIONS:
+                continue
+            file_id = filepath.stem
+            if file_id not in cls._files:
+                cls._files[file_id] = {
+                    'id': file_id,
+                    'filename': filepath.name,
+                    'filepath': str(filepath),
+                    'file_type': filepath.suffix.lower(),
+                    'encoding': None,
+                    'size': filepath.stat().st_size,
+                    'columns': [],
+                    'row_count': 0,
+                    'uploaded_at': datetime.fromtimestamp(filepath.stat().st_mtime).isoformat(),
+                }
+
+        retained_files = sorted(
+            cls._files.items(),
+            key=lambda item: item[1].get('uploaded_at', ''),
+            reverse=True,
+        )[:cls._retained_upload_count]
+        retained_ids = {file_id for file_id, _ in retained_files}
+        for file_id, metadata in list(cls._files.items()):
+            if file_id in retained_ids:
+                continue
+            filepath = Path(metadata['filepath'])
+            if filepath.exists():
+                filepath.unlink()
+            del cls._files[file_id]
+
+        cls._persist_catalog()
 
     @staticmethod
     def _json_safe_scalar(value):
@@ -122,6 +186,7 @@ class FileService:
         
         # Store DataFrame
         cls._dataframes[file_id] = df
+        cls._persist_catalog()
         
         return file_id
     
@@ -151,18 +216,25 @@ class FileService:
                 continue
             try:
                 df, encoding = cls.read_file(filepath, filepath.name)
-                cls._files[file_id] = {
+                metadata = cls._files.get(file_id, {
                     'id': file_id,
                     'filename': filepath.name,
+                    'filepath': str(filepath),
+                    'file_type': ext,
+                    'size': filepath.stat().st_size,
+                    'uploaded_at': datetime.now().isoformat(),
+                })
+                metadata.update({
                     'filepath': str(filepath),
                     'file_type': ext,
                     'encoding': encoding,
                     'size': filepath.stat().st_size,
                     'columns': df.columns.tolist(),
                     'row_count': len(df),
-                    'uploaded_at': datetime.now().isoformat(),
-                }
+                })
+                cls._files[file_id] = metadata
                 cls._dataframes[file_id] = df
+                cls._persist_catalog()
                 return df
             except Exception:
                 pass
@@ -170,12 +242,25 @@ class FileService:
     
     @classmethod
     def update_dataframe(cls, file_id: str, df: pd.DataFrame) -> bool:
-        """Update a stored DataFrame"""
+        """Update a stored DataFrame and its persisted uploaded file."""
         if file_id not in cls._files:
             return False
+        filepath = Path(cls._files[file_id].get('filepath') or '')
+        if filepath.exists():
+            temporary_path = filepath.with_name(f"{filepath.stem}.tmp{filepath.suffix}")
+            if filepath.suffix.lower() == '.csv':
+                df.to_csv(temporary_path, index=False)
+            elif filepath.suffix.lower() in ('.xlsx', '.xls'):
+                df.to_excel(temporary_path, index=False, engine='openpyxl')
+            else:
+                raise ValueError(f"Unsupported file extension: {filepath.suffix}")
+            temporary_path.replace(filepath)
         cls._dataframes[file_id] = df
         cls._files[file_id]['columns'] = df.columns.tolist()
         cls._files[file_id]['row_count'] = len(df)
+        if filepath.exists():
+            cls._files[file_id]['size'] = filepath.stat().st_size
+        cls._persist_catalog()
         return True
     
     @classmethod
@@ -238,6 +323,7 @@ class FileService:
         del cls._files[file_id]
         if file_id in cls._dataframes:
             del cls._dataframes[file_id]
+        cls._persist_catalog()
         
         return True
     

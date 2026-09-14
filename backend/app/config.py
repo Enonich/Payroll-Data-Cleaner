@@ -26,8 +26,10 @@ ALLOWED_EXTENSIONS = {'.csv', '.xlsx', '.xls'}
 CSV_ENCODINGS = ['utf-8', 'latin-1', 'cp1252', 'iso-8859-1']
 
 # Local AI audit settings
+# Set LLM_AUDIT_ENABLED=true to re-enable the separate AI audit workflow.
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "gemma4:e2b")
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
+LLM_AUDIT_ENABLED = os.getenv("LLM_AUDIT_ENABLED", "false").strip().lower() in {"1", "true", "yes", "on"}
 
 # ── Statutory contribution rates (override via environment variables) ──────────
 # Storing rates here means tax-rule changes only require a config update,

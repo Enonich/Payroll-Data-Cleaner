@@ -5,6 +5,7 @@ from fastapi import APIRouter, HTTPException
 from fastapi.responses import JSONResponse
 from typing import List, Optional, Dict, Any
 from pydantic import BaseModel
+from app import config
 from app.services.file_service import FileService
 from app.services.comparison_service import ComparisonService
 from app.services.ai_comparison_service import AIComparisonService
@@ -119,16 +120,18 @@ class EmployeeDataComparisonRequest(BaseModel):
     file2_id: str
     id_col1: str
     id_col2: str
-    column_mappings: List[Dict[str, str]]
+    column_mappings: List[Dict[str, Any]]
     name_col1: Optional[str] = None
     name_col2: Optional[str] = None
     normalize_ids: bool = True
     keep_digits: int = 5
     tolerance: float = 0.01
-    use_ai: bool = True
+    use_ai: bool = False
     # Optional user-supplied column role overrides:
     # keys are column labels, values are 'allowance' | 'deduction' | 'earning'
     column_roles: Optional[Dict[str, str]] = None
+    file1_label: Optional[str] = None
+    file2_label: Optional[str] = None
 
 
 class AllowanceDeductionRequest(BaseModel):
@@ -217,7 +220,7 @@ async def compare_salaries(request: SalaryComparisonRequest):
             "statistics": result['statistics'],
             "files_created": files_created,
             "report": report,
-            "preview_differences": result['with_difference_df'].head(20).to_dict('records')
+            "preview_differences": ComparisonService._json_safe_dataframe(result['with_difference_df'].head(20)).to_dict('records')
             if len(result['with_difference_df']) > 0 else []
         }
     except Exception as e:
@@ -357,7 +360,7 @@ async def compare_employee_data(request: EmployeeDataComparisonRequest):
         )
 
         ai_audit = None
-        if request.use_ai:
+        if request.use_ai and config.LLM_AUDIT_ENABLED:
             ai_audit = AIComparisonService.generate_audit(result, column_roles=request.column_roles)
 
         files_created = {}
@@ -376,17 +379,39 @@ async def compare_employee_data(request: EmployeeDataComparisonRequest):
                 result['only_in_file2_df'],
                 "employees_only_in_file2.csv"
             )
+        if len(result.get('missing_ids_df1', [])) > 0:
+            files_created['missing_ids_file1'] = FileService.create_new_file(
+                result['missing_ids_df1'],
+                "employees_missing_ids_file1.csv"
+            )
+        if len(result.get('missing_ids_df2', [])) > 0:
+            files_created['missing_ids_file2'] = FileService.create_new_file(
+                result['missing_ids_df2'],
+                "employees_missing_ids_file2.csv"
+            )
+        if len(result.get('missing_basic_salary_df1', [])) > 0:
+            files_created['missing_basic_salary_file1'] = FileService.create_new_file(
+                result['missing_basic_salary_df1'],
+                "employees_missing_basic_salary_file1.csv"
+            )
+        if len(result.get('missing_basic_salary_df2', [])) > 0:
+            files_created['missing_basic_salary_file2'] = FileService.create_new_file(
+                result['missing_basic_salary_df2'],
+                "employees_missing_basic_salary_file2.csv"
+            )
 
         reconciliation_payload = None
         reconciliation_warning = None
         try:
             file1_info = FileService.get_file_info(request.file1_id) or {}
             file2_info = FileService.get_file_info(request.file2_id) or {}
+            file1_label = request.file1_label or file1_info.get("filename", "File 1")
+            file2_label = request.file2_label or file2_info.get("filename", "File 2")
             reconciliation_run = ReconciliationService.create_run_from_employee_data_result(
                 request.file1_id,
                 request.file2_id,
-                file1_info.get("filename", "File 1"),
-                file2_info.get("filename", "File 2"),
+                file1_label,
+                file2_label,
                 result,
             )
             reconciliation_payload = {
@@ -411,11 +436,19 @@ async def compare_employee_data(request: EmployeeDataComparisonRequest):
                 "field_differences": result['field_differences'],
                 "duplicate_ids_file1": result['duplicate_ids_file1'],
                 "duplicate_ids_file2": result['duplicate_ids_file2'],
+                "missing_id_count_file1": result['missing_id_count_file1'],
+                "missing_id_count_file2": result['missing_id_count_file2'],
+                "missing_basic_salary_count_file1": result['missing_basic_salary_count_file1'],
+                "missing_basic_salary_count_file2": result['missing_basic_salary_count_file2'],
             },
             "duplicate_id_samples": {
                 "file1": result['duplicate_id_samples_file1'],
                 "file2": result['duplicate_id_samples_file2'],
             },
+            "missing_id_sample_file1": result['missing_id_sample_file1'],
+            "missing_id_sample_file2": result['missing_id_sample_file2'],
+            "missing_basic_salary_sample_file1": result['missing_basic_salary_sample_file1'],
+            "missing_basic_salary_sample_file2": result['missing_basic_salary_sample_file2'],
             "analytics": result['analytics'],
             "matching_columns": matching_columns,
             "name_columns": {
@@ -431,7 +464,7 @@ async def compare_employee_data(request: EmployeeDataComparisonRequest):
             "reconciliation_warning": reconciliation_warning,
             "ai_audit": ai_audit,
             "files_created": files_created,
-            "preview_differences": result['mismatches_df'].head(50).to_dict('records')
+            "preview_differences": ComparisonService._json_safe_dataframe(result['mismatches_df'].head(50)).to_dict('records')
             if len(result['mismatches_df']) > 0 else []
         }
     except Exception as e:
@@ -531,7 +564,7 @@ async def generate_employee_import_template(
             "message": "Employee import template generated",
             "file_id": new_file_id,
             "records": len(import_df),
-            "preview": import_df.head(10).to_dict('records')
+            "preview": ComparisonService._json_safe_dataframe(import_df.head(10)).to_dict('records')
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

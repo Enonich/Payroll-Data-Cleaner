@@ -22,6 +22,10 @@ OLLAMA_TIMEOUT    = 180   # seconds per model call
 CHUNK_SIZE        = 25    # max evidence packs per AI call
 TOKEN_LIMIT_CHUNK = 4_000 # rough token ceiling per chunk (~4 chars/token)
 MAX_MISMATCH_ROWS = 60    # rows kept in additional payload
+EMPLOYEE_MAX_ROWS = 25    # duplicate source rows retained for one employee
+EMPLOYEE_MAX_FIELD_CHARS = 500
+EMPLOYEE_PROMPT_SECTION_CHARS = 6_000
+EMPLOYEE_MAX_OUTPUT_TOKENS = 1_200
 
 # ---------------------------------------------------------------------------
 # CHUNKED DESIGN
@@ -73,6 +77,48 @@ Evidence packs for this batch:
 # Kept for backward-compat imports only
 HUMAN_PROMPT_TEMPLATE = ""
 
+EMPLOYEE_SYSTEM_PROMPT = """
+You are a senior payroll auditor investigating a single employee's payroll record
+across two files (e.g. previous vs. current payroll run).
+
+Explain WHY each flagged field differs by reasoning over the employee's full row
+data from both files. Consider whether a difference is explained by a related
+change elsewhere in the row -- for example:
+- A salary change may follow a rank/grade/notch change.
+- A take-home change may follow a deduction or allowance change.
+- A tax change may follow a basic salary change.
+Only use the data provided. Do not invent facts. If no correlated cause is found,
+say so and recommend manual verification.
+"""
+
+EMPLOYEE_HUMAN_PROMPT = """
+Employee: {employee_name} (ID: {employee_id})
+
+Flagged differences between {file1_label} and {file2_label}:
+{issues_json}
+
+Differing fields only from {file1_label} (identical fields are omitted -- they cannot explain a difference):
+{file1_json}
+
+Differing fields only from {file2_label} (identical fields are omitted -- they cannot explain a difference):
+{file2_json}
+
+Return ONLY valid JSON with this exact shape -- no preamble, no markdown fences:
+{{
+  "explanation": "2-4 sentence plain-language summary of what changed and why, referencing specific fields and values.",
+  "root_causes": [
+    {{
+      "field": "field name that changed",
+      "likely_cause": "specific correlated field/value that explains this change, or 'No correlated cause found in the data' if none",
+      "category": "allowance | deduction | notch | grade | branch | tax | data_quality | other",
+      "confidence": 0
+    }}
+  ],
+  "risk_level": "low | medium | high | critical",
+  "recommended_action": "One specific next step for the payroll officer."
+}}
+"""
+
 
 # ──────────────────────────────────────────────
 # Service
@@ -102,13 +148,38 @@ class AIComparisonService:
         fenced = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.DOTALL)
         candidate = fenced.group(1) if fenced else text.strip()
 
-        if not candidate.startswith("{"):
-            start = candidate.find("{")
-            end   = candidate.rfind("}")
-            if start >= 0 and end > start:
-                candidate = candidate[start : end + 1]
-            else:
-                raise ValueError(f"No JSON object found in model output:\n{text[:500]}")
+        start = candidate.find("{")
+        if start < 0:
+            raise ValueError(f"No JSON object found in model output:\n{text[:500]}")
+
+        # Parse the first complete object instead of using the final `}`. LangChain
+        # response metadata can follow the model content when a response is truncated.
+        depth = 0
+        in_string = False
+        escaped = False
+        end = None
+        for index in range(start, len(candidate)):
+            character = candidate[index]
+            if in_string:
+                if escaped:
+                    escaped = False
+                elif character == "\\":
+                    escaped = True
+                elif character == '"':
+                    in_string = False
+                continue
+            if character == '"':
+                in_string = True
+            elif character == "{":
+                depth += 1
+            elif character == "}":
+                depth -= 1
+                if depth == 0:
+                    end = index + 1
+                    break
+        if end is None:
+            raise ValueError(f"Incomplete JSON object in model output:\n{candidate[:500]}")
+        candidate = candidate[start:end]
 
         try:
             return json.loads(candidate)
@@ -378,6 +449,7 @@ class AIComparisonService:
             "LARGE_SALARY_CHANGE":         "salary",
             "ALLOWANCE_WITHOUT_SALARY":    "allowances",
             "ZERO_OR_BLANK":               "data_quality",
+            "MISSING_BASIC_SALARY":        "salary",
             "NEGATIVE_VALUE":              "data_quality",
             "EMPLOYER_DEDUCTION_DETECTED": "cross_field",
         }
@@ -461,7 +533,8 @@ class AIComparisonService:
                 base_url=OLLAMA_BASE_URL,
                 temperature=0,
                 format="json",
-                num_ctx=8192,
+                num_ctx=16384,
+                num_predict=768,
                 timeout=OLLAMA_TIMEOUT,
             )
         except Exception as exc:
@@ -514,4 +587,153 @@ class AIComparisonService:
             "chunks_total":             len(chunks),
             "chunks_with_fallback":     chunks_fail,
             "column_roles":             column_roles or {},
+        }
+
+    # ── single-employee investigation ─────────────────────────────────────────
+
+    @classmethod
+    def _employee_fallback(cls, bundle: Dict[str, Any], reason: str) -> Dict[str, Any]:
+        issues = bundle.get("issues") or []
+        root_causes = [
+            {
+                "field": issue.get("field"),
+                "likely_cause": issue.get("explanation") or "No correlated cause found in the data.",
+                "category": "other",
+                "confidence": 50,
+            }
+            for issue in issues
+        ]
+        return {
+            "enabled": True,
+            "available": False,
+            "model": OLLAMA_MODEL,
+            "warning": reason,
+            "explanation": (
+                f"AI investigation is unavailable ({reason}). Showing the {len(issues)} "
+                "flagged field difference(s) from the deterministic comparison instead."
+            ),
+            "root_causes": root_causes,
+            "risk_level": "unknown",
+            "recommended_action": "Ensure Ollama is running, then retry the investigation.",
+        }
+
+    @staticmethod
+    def _diff_only_rows(rows: List[Dict[str, Any]], diff_columns: Optional[List[str]]) -> List[Dict[str, Any]]:
+        """Keep only the columns that actually differ -- identical fields can't explain a difference."""
+        if not diff_columns:
+            return rows
+        keep = set(diff_columns)
+        return [{k: v for k, v in row.items() if k in keep} for row in rows]
+
+    @staticmethod
+    def _compact_employee_rows(rows: List[Dict[str, Any]], diff_columns: Optional[List[str]]) -> List[Dict[str, Any]]:
+        """Bound duplicate rows and unusually large cell values before prompt construction."""
+        compacted = []
+        for row in AIComparisonService._diff_only_rows(rows, diff_columns)[:EMPLOYEE_MAX_ROWS]:
+            compacted.append({
+                key: value[:EMPLOYEE_MAX_FIELD_CHARS] + "..."
+                if isinstance(value, str) and len(value) > EMPLOYEE_MAX_FIELD_CHARS
+                else value
+                for key, value in row.items()
+            })
+        return compacted
+
+    @staticmethod
+    def _bounded_prompt_json(value: Any, max_chars: int) -> str:
+        """Serialize prompt data without allowing one employee to consume the context window."""
+        serialized = json.dumps(value, indent=2, default=str)
+        if len(serialized) <= max_chars:
+            return serialized
+
+        if isinstance(value, list):
+            retained = []
+            for item in value:
+                candidate = json.dumps(retained + [item], indent=2, default=str)
+                if len(candidate) > max_chars:
+                    break
+                retained.append(item)
+            while retained:
+                bounded = json.dumps({
+                    "truncated": True,
+                    "shown": retained,
+                    "omitted_count": len(value) - len(retained),
+                }, indent=2, default=str)
+                if len(bounded) <= max_chars:
+                    return bounded
+                retained.pop()
+            return json.dumps({"truncated": True, "shown": [], "omitted_count": len(value)})
+
+        return json.dumps({
+            "truncated": True,
+            "note": "The original context was too large; only bounded evidence was sent.",
+        }, indent=2)
+
+    @classmethod
+    def investigate_employee(cls, bundle: Dict[str, Any]) -> Dict[str, Any]:
+        """Ask the model to explain why a single employee's flagged fields differ
+        between the two source files, using only the differing columns as context."""
+        employee_id = bundle.get("employee_id")
+        employee_name = bundle.get("employee_name") or "Unknown"
+        issues = bundle.get("issues") or []
+
+        if not issues:
+            return {
+                "enabled": True,
+                "available": True,
+                "model": OLLAMA_MODEL,
+                "explanation": "No flagged differences were found for this employee in this reconciliation run.",
+                "root_causes": [],
+                "risk_level": "low",
+                "recommended_action": "No action required.",
+            }
+
+        try:
+            llm = ChatOllama(
+                model=OLLAMA_MODEL,
+                base_url=OLLAMA_BASE_URL,
+                temperature=0,
+                format="json",
+                num_ctx=8192,
+                num_predict=EMPLOYEE_MAX_OUTPUT_TOKENS,
+                timeout=OLLAMA_TIMEOUT,
+            )
+        except Exception as exc:
+            logger.error("Failed to instantiate Ollama model: %s", exc, exc_info=True)
+            return cls._employee_fallback(bundle, f"{type(exc).__name__}: {exc}")
+
+        file1_diff_rows = cls._compact_employee_rows(bundle.get("file1_rows") or [], bundle.get("file1_diff_columns"))
+        file2_diff_rows = cls._compact_employee_rows(bundle.get("file2_rows") or [], bundle.get("file2_diff_columns"))
+
+        prompt = EMPLOYEE_HUMAN_PROMPT.format(
+            employee_name=employee_name,
+            employee_id=employee_id,
+            file1_label=bundle.get("file1_label") or "File 1",
+            file2_label=bundle.get("file2_label") or "File 2",
+            issues_json=cls._bounded_prompt_json(issues, EMPLOYEE_PROMPT_SECTION_CHARS),
+            file1_json=cls._bounded_prompt_json(file1_diff_rows, EMPLOYEE_PROMPT_SECTION_CHARS),
+            file2_json=cls._bounded_prompt_json(file2_diff_rows, EMPLOYEE_PROMPT_SECTION_CHARS),
+        )
+
+        try:
+            response = llm.invoke([SystemMessage(content=EMPLOYEE_SYSTEM_PROMPT), HumanMessage(content=prompt)])
+            raw_content = getattr(response, "content", None)
+            if isinstance(raw_content, dict):
+                parsed = raw_content
+            else:
+                raw = raw_content if isinstance(raw_content, str) else ""
+                parsed = cls._extract_json(raw)
+            if not parsed:
+                raise ValueError("AI model returned an empty JSON object.")
+        except Exception as exc:
+            logger.warning("Employee investigation call failed (%s): %s", type(exc).__name__, exc)
+            return cls._employee_fallback(bundle, f"{type(exc).__name__}: {exc}")
+
+        return {
+            "enabled": True,
+            "available": True,
+            "model": OLLAMA_MODEL,
+            "explanation": parsed.get("explanation") or "The model did not return an explanation.",
+            "root_causes": parsed.get("root_causes") or [],
+            "risk_level": parsed.get("risk_level") or "medium",
+            "recommended_action": parsed.get("recommended_action") or "Review manually.",
         }

@@ -323,6 +323,7 @@ class DeterministicAuditService:
         packs: List[Dict[str, Any]] = []
         packs.extend(cls._check_duplicates(cr))
         packs.extend(cls._check_presence(cr))
+        packs.extend(cls._check_missing_basic_salary(cr))
         packs.extend(cls._check_large_changes(cr))
         packs.extend(cls._check_allowance_without_salary(cr))
         packs.extend(cls._check_zero_blanks(cr))
@@ -331,6 +332,41 @@ class DeterministicAuditService:
         return packs
 
     # ── Financial check helpers ────────────────────────────────────────────────
+
+    @classmethod
+    def _check_missing_basic_salary(cls, cr: Dict[str, Any]) -> List[Dict[str, Any]]:
+        packs: List[Dict[str, Any]] = []
+        for file_label, count_key, sample_key, column_key in [
+            ("File 1", "missing_basic_salary_count_file1", "missing_basic_salary_sample_file1", "basic_salary_column_file1"),
+            ("File 2", "missing_basic_salary_count_file2", "missing_basic_salary_sample_file2", "basic_salary_column_file2"),
+        ]:
+            count = int(cr.get(count_key) or 0)
+            if not count:
+                continue
+            samples = cr.get(sample_key) or []
+            sample_ids = [str(row.get("employee_id")) for row in samples[:10] if row.get("employee_id")]
+            packs.append({
+                "issue_type": "MISSING_BASIC_SALARY",
+                "severity": "critical",
+                "confidence": 100,
+                "file": file_label,
+                "employee": {"staff_id": f"{count} employee(s)"},
+                "evidence": {
+                    "affected_count": count,
+                    "basic_salary_column": cr.get(column_key),
+                    "sample_ids": sample_ids,
+                    "sample_rows": samples[:10],
+                },
+                "rule_triggered": (
+                    f"{count} employee(s) have no basic salary in {file_label}. "
+                    "The value is blank, zero, or missing."
+                ),
+                "recommended_action": (
+                    f"Populate and verify the basic salary column in {file_label} "
+                    "before approving or processing payroll."
+                ),
+            })
+        return packs
 
     @classmethod
     def _check_duplicates(cls, cr: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -428,7 +464,9 @@ class DeterministicAuditService:
 
         salary_rows["_pct"] = salary_rows.apply(_pct, axis=1)
         large = salary_rows[
-            salary_rows["_pct"].notna() & (salary_rows["_pct"].abs() > SALARY_CHANGE_THRESHOLD)
+            salary_rows["_pct"].apply(
+                lambda value: value is not None and abs(value) > SALARY_CHANGE_THRESHOLD
+            )
         ]
 
         for _, row in large.iterrows():

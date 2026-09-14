@@ -9,7 +9,11 @@
         "basic",
         "basic pay",
         "base salary",
-        "base pay"
+        "base pay",
+        "monthly salary",
+        "monthlysalary",
+        "basic salary (monthly salary)",
+        "basic salary monthly salary"
       ],
       "category": "earnings",
       "type": "currency"
@@ -210,12 +214,9 @@
     {
       "label": "Taxable Salary",
       "aliases": [
-        "taxable salary",
-        "taxablesalary",
-        "taxable income",
-        "taxable pay"
+        "taxable salary"
       ],
-      "category": "earnings",
+      "category": "other",
       "type": "currency"
     },
     {
@@ -267,22 +268,15 @@
     {
       "label": "Tax Relief",
       "aliases": [
-        "tax relief",
-        "taxrelief",
-        "relief"
+        "tax relief"
       ],
-      "category": "deductions",
+      "category": "other",
       "type": "currency"
     },
     {
       "label": "Income Tax",
       "aliases": [
-        "income tax",
-        "incometax",
-        "paye",
-        "p.a.y.e",
-        "tax",
-        "it"
+        "income tax"
       ],
       "category": "deductions",
       "type": "currency"
@@ -369,22 +363,17 @@
     {
       "label": "Total Deductions",
       "aliases": [
-        "total deductions",
-        "totaldeductions",
-        "total deduction"
+        "total deductions"
       ],
-      "category": "deductions",
+      "category": "other",
       "type": "currency"
     },
     {
       "label": "Other Deductions",
       "aliases": [
-        "other deductions",
-        "otherdeductions",
-        "misc deductions",
-        "other deduction"
+        "other deductions"
       ],
-      "category": "deductions",
+      "category": "other",
       "type": "currency"
     },
     {
@@ -470,30 +459,17 @@
       "type": "currency"
     },
     {
-      "label": "Staff ID",
+      "label": "STAFF ID",
       "aliases": [
-        "staff id",
-        "staffid",
-        "employee id",
-        "employeeid",
-        "emp id",
-        "empid",
-        "staff no",
-        "emp no"
+        "staff id"
       ],
       "category": "identity",
-      "type": "text"
+      "type": "currency"
     },
     {
       "label": "NATIONAL ID",
       "aliases": [
-        "national id",
-        "National ID",
-        "NATIONAL ID",
-        "National_ID",
-        "National_Id",
-        "national_id",
-        "NATIONAL ID"
+        "national id"
       ],
       "category": "identity",
       "type": "currency"
@@ -515,7 +491,7 @@
       "aliases": [
         "account number"
       ],
-      "category": "identity",
+      "category": "other",
       "type": "currency"
     },
     {
@@ -532,7 +508,7 @@
       "type": "text"
     },
     {
-      "label": "BRANCH",
+      "label": "Branch",
       "aliases": [
         "branch"
       ],
@@ -579,7 +555,7 @@
       "aliases": [
         "old annual salaries"
       ],
-      "category": "earnings",
+      "category": "other",
       "type": "currency"
     },
     {
@@ -587,7 +563,7 @@
       "aliases": [
         "new annual salaries"
       ],
-      "category": "earnings",
+      "category": "other",
       "type": "currency"
     },
     {
@@ -611,7 +587,7 @@
       "aliases": [
         "tax relieve"
       ],
-      "category": "allowances",
+      "category": "other",
       "type": "currency"
     },
     {
@@ -619,7 +595,7 @@
       "aliases": [
         "chargable income"
       ],
-      "category": "earnings",
+      "category": "other",
       "type": "currency"
     },
     {
@@ -627,7 +603,7 @@
       "aliases": [
         "tax paid"
       ],
-      "category": "deductions",
+      "category": "other",
       "type": "currency"
     },
     {
@@ -739,7 +715,7 @@
       "aliases": [
         "g boy /sec tnt"
       ],
-      "category": "other",
+      "category": "allowances",
       "type": "currency"
     },
     {
@@ -752,6 +728,150 @@
         "Names"
       ],
       "category": "identity",
+      "type": "currency"
+    },
+    {
+      "label": "STAFF NAMES",
+      "aliases": [
+        "staff names"
+      ],
+      "category": "identity",
+      "type": "currency"
+    },
+    {
+      "label": "Ghana Card",
+      "aliases": [
+        "ghana card"
+      ],
+      "category": "identity",
+      "type": "currency"
+    },
+    {
+      "label": "Non-tax Allow.",
+      "aliases": [
+        "non-tax allow."
+      ],
+      "category": "other",
+      "type": "currency"
+    },
+    {
+      "label": "Total Emoluments",
+      "aliases": [
+        "total emoluments"
+      ],
+      "category": "other",
+      "type": "currency"
+    },
+    {
+      "label": "Tier 1 SSNIT Employee",
+      "aliases": [
+        "tier 1 ssnit employee"
+      ],
+      "category": "deductions",
+      "type": "currency"
+    },
+    {
+      "label": "Tier 2 Occupational Pension Employee",
+      "aliases": [
+        "tier 2 occupational pension employee"
+      ],
+      "category": "deductions",
+      "type": "currency"
+    },
+    {
+      "label": "OTHER DEDUCTION",
+      "aliases": [
+        "other deduction"
+      ],
+      "category": "deductions",
+      "type": "currency"
+    },
+    {
+      "label": "SIC INSURANCE",
+      "aliases": [
+        "sic insurance"
+      ],
+      "category": "deductions",
+      "type": "currency"
+    },
+    {
+      "label": "STUDENT LOAD DEDUCTION",
+      "aliases": [
+        "student load deduction"
+      ],
+      "category": "deductions",
+      "type": "currency"
+    },
+    {
+      "label": "TELEPHONE",
+      "aliases": [
+        "telephone"
+      ],
+      "category": "identity",
+      "type": "currency"
+    },
+    {
+      "label": "Tier 1 SSNIT Employer",
+      "aliases": [
+        "tier 1 ssnit employer"
+      ],
+      "category": "deductions",
+      "type": "currency"
+    },
+    {
+      "label": "Tier 2 Occupational Pension Employer",
+      "aliases": [
+        "tier 2 occupational pension employer"
+      ],
+      "category": "deductions",
+      "type": "currency"
+    },
+    {
+      "label": "Tier 3 Provident Fund Employer",
+      "aliases": [
+        "tier 3 provident fund employer"
+      ],
+      "category": "deductions",
+      "type": "currency"
+    },
+    {
+      "label": "5.5% SSNIT",
+      "aliases": [
+        "5.5% ssnit"
+      ],
+      "category": "deductions",
+      "type": "currency"
+    },
+    {
+      "label": "7.5% PF",
+      "aliases": [
+        "7.5% pf"
+      ],
+      "category": "deductions",
+      "type": "currency"
+    },
+    {
+      "label": "RENT ALLCE",
+      "aliases": [
+        "rent allce"
+      ],
+      "category": "allowances",
+      "type": "currency"
+    },
+    {
+      "label": "UTILITY ALLCE",
+      "aliases": [
+        "utility allce"
+      ],
+      "category": "allowances",
+      "type": "currency"
+    },
+    {
+      "label": "AG ALLOWANCE",
+      "aliases": [
+        "ag allowance"
+      ],
+      "category": "allowances",
       "type": "currency"
     }
   ]

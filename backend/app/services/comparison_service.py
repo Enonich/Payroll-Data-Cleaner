@@ -2,6 +2,7 @@
 Comparison service - handles payroll file comparisons
 Extracted and generalized from the payroll comparison notebooks
 """
+import math
 from typing import Dict, List, Optional, Tuple, Any
 import pandas as pd
 import numpy as np
@@ -142,10 +143,20 @@ class ComparisonService:
 
     @staticmethod
     def _json_safe_scalar(value: Any) -> Any:
-        if pd.isna(value):
+        if value is None:
             return None
+        if isinstance(value, float):
+            return None if (math.isnan(value) or math.isinf(value)) else value
         if isinstance(value, np.generic):
-            return value.item()
+            val = value.item()
+            if isinstance(val, float) and (math.isnan(val) or math.isinf(val)):
+                return None
+            return val
+        try:
+            if pd.isna(value):
+                return None
+        except Exception:
+            pass
         return value
 
     @classmethod
@@ -157,6 +168,18 @@ class ComparisonService:
         else:
             safe_df = df.applymap(cls._json_safe_scalar)
         return safe_df.astype(object).where(pd.notna(safe_df), None)
+
+    @staticmethod
+    def _safe_float(value: Any) -> Optional[float]:
+        if value is None:
+            return None
+        try:
+            result = float(value)
+        except (TypeError, ValueError):
+            return None
+        if math.isnan(result) or math.isinf(result):
+            return None
+        return result
 
     @staticmethod
     def _sample_presence_rows(df: pd.DataFrame, id_col: str, name_col: Optional[str] = None,
@@ -230,10 +253,10 @@ class ComparisonService:
                 'employee_impact_rate': 0 if matched_count == 0 else affected_employees / matched_count,
             }
             if 'abs_difference' in field_df.columns:
-                summary['total_abs_difference'] = float(field_df['abs_difference'].sum())
-                summary['average_abs_difference'] = float(field_df['abs_difference'].mean())
+                summary['total_abs_difference'] = ComparisonService._safe_float(field_df['abs_difference'].sum())
+                summary['average_abs_difference'] = ComparisonService._safe_float(field_df['abs_difference'].mean())
                 if 'difference' in field_df.columns:
-                    summary['net_difference'] = float(field_df['difference'].sum())
+                    summary['net_difference'] = ComparisonService._safe_float(field_df['difference'].sum())
             field_summary.append(summary)
 
         field_summary = sorted(
@@ -251,11 +274,16 @@ class ComparisonService:
             field_summary[0] if field_summary else None,
         )
 
+        total_abs_difference = (
+            ComparisonService._safe_float(mismatches_df['abs_difference'].sum())
+            if 'abs_difference' in mismatches_df.columns else 0
+        )
+
         return {
             'matched_rate': 0 if matched_count == 0 else int(mismatches_df['employee_id'].nunique()) / matched_count,
             'field_summary': field_summary,
             'largest_variance_field': largest_variance_field,
-            'total_abs_difference': float(mismatches_df['abs_difference'].sum()) if 'abs_difference' in mismatches_df.columns else 0,
+            'total_abs_difference': total_abs_difference,
             'numeric_fields_compared': len(numeric_fields),
             'text_fields_compared': len(text_fields),
             'total_fields_compared': total_fields_compared,
@@ -307,6 +335,58 @@ class ComparisonService:
         overlap = len(tokens1 & tokens2)
         similarity = overlap / max(len(tokens1), len(tokens2))
         return similarity < 0.65
+
+    @staticmethod
+    def _find_context_column(columns: Any, terms: List[str]) -> Optional[str]:
+        """Find a grade/notch context column without requiring it to be audited."""
+        for column in columns:
+            normalized = ''.join(ch for ch in str(column).lower() if ch.isalnum())
+            if any(term in normalized for term in terms):
+                return column
+        return None
+
+    @staticmethod
+    def _find_basic_salary_column(columns: Any) -> Optional[str]:
+        aliases = {'basicsalary', 'basicpay', 'monthlysalary', 'monthlybasic', 'basic'}
+        for column in columns:
+            normalized = ''.join(ch for ch in str(column).lower() if ch.isalnum())
+            if normalized in aliases or normalized.startswith(('basicsalary', 'basicpay', 'monthlysalary', 'monthlybasic')):
+                return column
+        return None
+
+    @staticmethod
+    def _is_blank_or_zero(value: Any) -> bool:
+        if value is None:
+            return True
+        try:
+            if bool(pd.isna(value)):
+                return True
+        except (TypeError, ValueError):
+            pass
+        text = str(value).strip().lower().replace(',', '')
+        if text in {'', 'nan', 'none', 'null', '<na>', 'nat', '-', '–', '—', 'n/a', 'na'}:
+            return True
+        try:
+            return float(text) == 0
+        except (TypeError, ValueError):
+            return False
+
+    @classmethod
+    def _missing_basic_salary_rows(
+        cls, df: pd.DataFrame, id_column: str, name_column: Optional[str], basic_column: Optional[str]
+    ) -> Tuple[int, List[Dict[str, Any]], pd.DataFrame]:
+        if not basic_column or basic_column not in df.columns:
+            return 0, [], df.iloc[0:0].copy()
+        missing = df[df[basic_column].apply(cls._is_blank_or_zero)].copy()
+        samples = []
+        for index, row in missing.head(20).iterrows():
+            samples.append({
+                'row_number': int(index) + 2,
+                'employee_id': cls._json_safe_scalar(row.get(id_column)),
+                'employee_name': cls._json_safe_scalar(row.get(name_column)) if name_column else None,
+                'basic_salary': cls._json_safe_scalar(row.get(basic_column)),
+            })
+        return len(missing), samples, missing
 
     @staticmethod
     def _values_differ(value1: Any, value2: Any, value_type: str, tolerance: float) -> bool:
@@ -379,6 +459,17 @@ class ComparisonService:
             if col2 not in payload_cols2:
                 payload_cols2.append(col2)
 
+        grade_col1 = ComparisonService._find_context_column(df1_work.columns, ('grade', 'rank', 'level'))
+        grade_col2 = ComparisonService._find_context_column(df2_work.columns, ('grade', 'rank', 'level'))
+        notch_col1 = ComparisonService._find_context_column(df1_work.columns, ('notch', 'step'))
+        notch_col2 = ComparisonService._find_context_column(df2_work.columns, ('notch', 'step'))
+        for context_col, payload_cols in (
+            (grade_col1, payload_cols1), (grade_col2, payload_cols2),
+            (notch_col1, payload_cols1), (notch_col2, payload_cols2),
+        ):
+            if context_col and context_col not in payload_cols:
+                payload_cols.append(context_col)
+
         merged = pd.merge(
             df1_work[df1_work[merge_col] != ''][payload_cols1],
             df2_work[df2_work[merge_col] != ''][payload_cols2],
@@ -402,12 +493,15 @@ class ComparisonService:
                 col2 = mapping['file2']
                 value_type = mapping.get('type', 'text')
                 label = mapping.get('label') or mapping.get('field') or col1
+                field_tolerance = tolerance
+                if value_type in ('currency', 'number', 'numeric') and mapping.get('threshold') not in (None, ''):
+                    field_tolerance = max(0, float(mapping['threshold']))
                 source_col = merged_col_name(col1, 'file1')
                 target_col = merged_col_name(col2, 'file2')
                 value1 = row[source_col]
                 value2 = row[target_col]
 
-                if ComparisonService._values_differ(value1, value2, value_type, tolerance):
+                if ComparisonService._values_differ(value1, value2, value_type, field_tolerance):
                     employee_issue_count += 1
                     issue = {
                         'issue_type': 'field_mismatch',
@@ -420,16 +514,26 @@ class ComparisonService:
                         'file1_value': value1,
                         'file2_value': value2,
                         'comparison_type': value_type,
+                        'category': mapping.get('category'),
                     }
                     if value_type in ('currency', 'number', 'numeric'):
                         clean1 = DataCleaningService.clean_currency_value(value1)
                         clean2 = DataCleaningService.clean_currency_value(value2)
                         issue['difference'] = clean2 - clean1
                         issue['abs_difference'] = abs(clean2 - clean1)
+                        issue['threshold'] = field_tolerance
                     if name_col1 and merged_col_name(name_col1, 'file1') in merged.columns:
                         issue['file1_name'] = row[merged_col_name(name_col1, 'file1')]
                     if name_col2 and merged_col_name(name_col2, 'file2') in merged.columns:
                         issue['file2_name'] = row[merged_col_name(name_col2, 'file2')]
+                    for context_name, context_col1, context_col2 in (
+                        ('grade', grade_col1, grade_col2),
+                        ('notch', notch_col1, notch_col2),
+                    ):
+                        if context_col1 and merged_col_name(context_col1, 'file1') in merged.columns:
+                            issue[f'file1_{context_name}'] = row[merged_col_name(context_col1, 'file1')]
+                        if context_col2 and merged_col_name(context_col2, 'file2') in merged.columns:
+                            issue[f'file2_{context_name}'] = row[merged_col_name(context_col2, 'file2')]
                     mismatch_rows.append({
                         key: ComparisonService._json_safe_scalar(value)
                         for key, value in issue.items()
@@ -465,6 +569,15 @@ class ComparisonService:
         )
         mismatches_clean = ComparisonService._json_safe_dataframe(mismatches_df)
 
+        basic_col1 = ComparisonService._find_basic_salary_column(df1_work.columns)
+        basic_col2 = ComparisonService._find_basic_salary_column(df2_work.columns)
+        missing_basic_count1, missing_basic_sample1, missing_basic_df1 = ComparisonService._missing_basic_salary_rows(
+            df1_work, id_col1, name_col1, basic_col1
+        )
+        missing_basic_count2, missing_basic_sample2, missing_basic_df2 = ComparisonService._missing_basic_salary_rows(
+            df2_work, id_col2, name_col2, basic_col2
+        )
+
         return {
             'total_file1': len(df1),
             'total_file2': len(df2),
@@ -480,12 +593,22 @@ class ComparisonService:
             'duplicate_id_samples_file2': duplicate_ids_file2[:20],
             'missing_id_count_file1': int(missing_id_mask1.sum()),
             'missing_id_count_file2': int(missing_id_mask2.sum()),
+            'basic_salary_column_file1': basic_col1,
+            'basic_salary_column_file2': basic_col2,
+            'missing_basic_salary_count_file1': missing_basic_count1,
+            'missing_basic_salary_count_file2': missing_basic_count2,
+            'missing_basic_salary_sample_file1': missing_basic_sample1,
+            'missing_basic_salary_sample_file2': missing_basic_sample2,
             'missing_id_sample_file1': ComparisonService._sample_missing_id_rows(
                 df1_work[missing_id_mask1], id_col1, name_col1
             ),
             'missing_id_sample_file2': ComparisonService._sample_missing_id_rows(
                 df2_work[missing_id_mask2], id_col2, name_col2
             ),
+            'missing_ids_df1': df1_work[missing_id_mask1].drop(columns=[merge_col], errors='ignore'),
+            'missing_ids_df2': df2_work[missing_id_mask2].drop(columns=[merge_col], errors='ignore'),
+            'missing_basic_salary_df1': missing_basic_df1.drop(columns=[merge_col], errors='ignore'),
+            'missing_basic_salary_df2': missing_basic_df2.drop(columns=[merge_col], errors='ignore'),
             'analytics': analytics,
             'mismatches_df': mismatches_clean,
             'only_in_file1_df': only_in_file1_clean,

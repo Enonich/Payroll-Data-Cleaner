@@ -4,6 +4,7 @@ Payroll Data Cleaning Application - FastAPI Backend
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app.routers import upload, cleaning, comparison, export, jobs, reconciliation, column_definitions
+from app.services.file_service import FileService
 
 app = FastAPI(
     title="Payroll Data Cleaning API",
@@ -19,6 +20,12 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.on_event("startup")
+async def restore_uploaded_files():
+    FileService.load_persisted_files()
+
 
 # Include routers
 app.include_router(upload.router, prefix="/api/upload", tags=["Upload"])

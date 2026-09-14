@@ -6,6 +6,7 @@ from fastapi.responses import JSONResponse
 from typing import List, Optional, Dict, Any, Literal, Tuple
 from pydantic import BaseModel, Field
 from difflib import SequenceMatcher
+import pandas as pd
 import re
 from rapidfuzz import fuzz as rapidfuzz_fuzz
 from app.services.file_service import FileService
@@ -708,6 +709,8 @@ async def apply_row_updates(request: ApplyRowUpdatesRequest):
 
                 current_value = result_df.at[item.row_index, field]
                 if str(current_value) != str(new_value):
+                    if isinstance(new_value, str) and pd.api.types.is_numeric_dtype(result_df[field]):
+                        result_df[field] = result_df[field].astype(object)
                     result_df.at[item.row_index, field] = new_value
                     updated_cells += 1
 

@@ -2,6 +2,7 @@
 SQLite persistence for templates and cleaning jobs.
 """
 import json
+import math
 import sqlite3
 from pathlib import Path
 from threading import Lock
@@ -158,8 +159,35 @@ class DBService:
             conn.close()
 
     @staticmethod
+    def sanitize_for_json(obj: Any) -> Any:
+        if obj is None:
+            return None
+        if isinstance(obj, float):
+            return None if (math.isnan(obj) or math.isinf(obj)) else obj
+        if hasattr(obj, "item") and callable(getattr(obj, "item")):
+            try:
+                val = obj.item()
+                if isinstance(val, float) and (math.isnan(val) or math.isinf(val)):
+                    return None
+                return val
+            except (TypeError, ValueError):
+                pass
+        if isinstance(obj, dict):
+            return {str(k): DBService.sanitize_for_json(v) for k, v in obj.items()}
+        if isinstance(obj, (list, tuple)):
+            return [DBService.sanitize_for_json(v) for v in obj]
+        try:
+            import pandas as pd
+            if pd.isna(obj):
+                return None
+        except Exception:
+            pass
+        return obj
+
+    @staticmethod
     def dumps_json(value: Any) -> str:
-        return json.dumps(value, ensure_ascii=True)
+        cleaned = DBService.sanitize_for_json(value)
+        return json.dumps(cleaned, ensure_ascii=True)
 
     @staticmethod
     def loads_json(value: str, fallback: Any) -> Any:

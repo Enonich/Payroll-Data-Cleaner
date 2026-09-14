@@ -236,6 +236,18 @@ export const exportApprovedReconciliationUpdates = async (runId) => {
   return response.data;
 };
 
+export const exportRoleDifferences = async (runId) => {
+  const response = await api.post(`/reconciliation/${runId}/export-role-differences`);
+  return response.data;
+};
+
+export const exportInvestigatedDifferences = async (runId, employeeIds) => {
+  const response = await api.post(`/reconciliation/${runId}/export-investigated-differences`, {
+    employee_ids: employeeIds,
+  });
+  return response.data;
+};
+
 export const getReconciliationReport = async (runId) => {
   const response = await api.get(`/reconciliation/${runId}/report`);
   return response.data;
@@ -243,6 +255,16 @@ export const getReconciliationReport = async (runId) => {
 
 export const exportReconciliationReport = async (runId) => {
   const response = await api.post(`/reconciliation/${runId}/report/export`);
+  return response.data;
+};
+
+export const getEmployeeBundle = async (runId, employeeId, config = {}) => {
+  const response = await api.get(`/reconciliation/${runId}/employee/${encodeURIComponent(employeeId)}`, config);
+  return response.data;
+};
+
+export const investigateEmployee = async (runId, employeeId, config = {}) => {
+  const response = await api.post(`/reconciliation/${runId}/employee/${encodeURIComponent(employeeId)}/investigate`, undefined, config);
   return response.data;
 };
 

@@ -7,36 +7,43 @@ import {
   getFileColumns,
   compareEmployeeData,
   getReconciliationRun,
+  listReconciliationRuns,
   applyReconciliationAction,
   applyBulkReconciliationAction,
   exportApprovedReconciliationUpdates,
+  exportRoleDifferences,
+  exportInvestigatedDifferences,
   downloadCsv,
   getColumnDefinitions,
   addColumnDefinitionEntry,
   replaceColumnDefinitions,
+  investigateEmployee,
+  getEmployeeBundle,
 } from '../services/api';
 
 const PAYROLL_FIELD_CATALOG = [
   { label: 'Name',             aliases: ['name', 'employee name', 'fullname', 'full name'],                                    type: 'text',     category: 'identity'   },
   { label: 'Branch',           aliases: ['branch', 'location', 'office'],                                                      type: 'text',     category: 'identity'   },
   { label: 'Annual Salary',    aliases: ['annual salary', 'annualsalary'],                                                     type: 'currency', category: 'earnings'   },
-  { label: 'Basic Salary',     aliases: ['basic salary', 'basicsalary', 'basic'],                                              type: 'currency', category: 'earnings'   },
+  { label: 'Basic Salary',     aliases: ['basic salary', 'basicsalary', 'basic', 'monthly salary', 'monthlysalary', 'basic salary (monthly salary)', 'basic salary monthly salary'],                                              type: 'currency', category: 'earnings'   },
   { label: 'Taxable Allowance',aliases: ['taxable allowance', 'taxableallowance'],                                             type: 'currency', category: 'allowances' },
-  { label: '5.5% SSF',         aliases: ['5.5% ssf', '55 ssf', '55ssf', 'ssf 5.5', 'ssf5.5'],                                type: 'currency', category: 'deductions' },
-  { label: '4.5% Staff PF',    aliases: ['4.5% staff pf', '45staffpf', 'staff pf', 'staffpf', '45 pf'],                      type: 'currency', category: 'deductions' },
-  { label: 'Tax Relief',       aliases: ['tax relief', 'taxrelief'],                                                           type: 'currency', category: 'deductions' },
+  { label: '5.5% SSF',         aliases: ['5.5% ssf', '55 ssf', '55ssf', 'ssf 5.5', 'ssf5.5'],                                type: 'currency', category: 'statutory_deductions' },
+  { label: '4.5% Staff PF',    aliases: ['4.5% staff pf', '45staffpf', 'staff pf', 'staffpf', '45 pf'],                      type: 'currency', category: 'statutory_deductions' },
+  { label: 'Tax Relief',       aliases: ['tax relief', 'taxrelief'],                                                           type: 'currency', category: 'statutory_deductions' },
   { label: 'Taxable Salary',   aliases: ['taxable salary', 'taxablesalary'],                                                   type: 'currency', category: 'earnings'   },
-  { label: 'Income Tax',       aliases: ['income tax', 'incometax', 'paye'],                                                   type: 'currency', category: 'deductions' },
-  { label: 'Other Deductions', aliases: ['other deductions', 'otherdeductions'],                                               type: 'currency', category: 'deductions' },
+  { label: 'Income Tax',       aliases: ['income tax', 'incometax', 'paye'],                                                   type: 'currency', category: 'statutory_deductions' },
+  { label: 'Other Deductions', aliases: ['other deductions', 'otherdeductions'],                                               type: 'currency', category: 'non_statutory_deductions' },
   { label: 'Deductions',       aliases: ['deductions', 'deduction'],                                                           type: 'currency', category: 'deductions' },
   { label: 'Total Deductions', aliases: ['total deductions', 'totaldeductions'],                                               type: 'currency', category: 'deductions' },
   { label: 'Take Home',        aliases: ['take home', 'takehome', 'net pay', 'netpay'],                                        type: 'currency', category: 'earnings'   },
-  { label: '13% SSF',          aliases: ['13% ssf', '13ssf'],                                                                  type: 'currency', category: 'deductions' },
-  { label: '11% PF',           aliases: ['11% pf', '11pf'],                                                                   type: 'currency', category: 'deductions' },
-  { label: '1st Tier (13.5%)', aliases: ['1st tier (13.5%)', '1st tier 13.5', '1sttier135', 'first tier 13.5'],               type: 'currency', category: 'deductions' },
-  { label: '1st Tier (5%)',    aliases: ['1st tier (5%)', '1st tier 5', '1sttier5', 'first tier 5'],                          type: 'currency', category: 'deductions' },
-  { label: '3rd Tier (15.5%)', aliases: ['3rd tier (15.5%)', '3rd tier 15.5', '3rdtier155', 'third tier 15.5'],               type: 'currency', category: 'deductions' },
+  { label: '13% SSF',          aliases: ['13% ssf', '13ssf'],                                                                  type: 'currency', category: 'statutory_deductions' },
+  { label: '11% PF',           aliases: ['11% pf', '11pf'],                                                                   type: 'currency', category: 'statutory_deductions' },
+  { label: '1st Tier (13.5%)', aliases: ['1st tier (13.5%)', '1st tier 13.5', '1sttier135', 'first tier 13.5'],               type: 'currency', category: 'statutory_deductions' },
+  { label: '1st Tier (5%)',    aliases: ['1st tier (5%)', '1st tier 5', '1sttier5', 'first tier 5'],                          type: 'currency', category: 'statutory_deductions' },
+  { label: '3rd Tier (15.5%)', aliases: ['3rd tier (15.5%)', '3rd tier 15.5', '3rdtier155', 'third tier 15.5'],               type: 'currency', category: 'statutory_deductions' },
 ];
+
+const AUDIT_RESULT_STORAGE_KEY = 'payroll-audit-result';
 
 const toneClasses = {
   blue: 'bg-blue-50 text-blue-900 border-blue-100',
@@ -141,7 +148,7 @@ function inferPayrollMappingsForType(columns1, columns2, type = 'full', catalog 
     if (field.label === 'Name') return false;
     if (type === 'full')        return field.category !== 'identity';
     if (type === 'allowances')  return field.category === 'earnings' || field.category === 'allowances';
-    if (type === 'deductions')  return field.category === 'earnings' || field.category === 'deductions';
+    if (type === 'deductions')  return field.category === 'earnings' || ['deductions', 'statutory_deductions', 'non_statutory_deductions'].includes(field.category);
     return false;
   });
 
@@ -232,12 +239,12 @@ function MetricCard({ title, value, subtitle, tone = 'slate' }) {
   );
 }
 
-function StackedPresenceBar({ summary }) {
+function StackedPresenceBar({ summary, file1Name = 'File 1', file2Name = 'File 2' }) {
   const total = Math.max(1, (summary?.matched || 0) + (summary?.only_in_file1 || 0) + (summary?.only_in_file2 || 0));
   const segments = [
     { label: 'Matched', value: summary?.matched || 0, className: 'bg-blue-500' },
-    { label: 'Only File 1', value: summary?.only_in_file1 || 0, className: 'bg-amber-500' },
-    { label: 'Only File 2', value: summary?.only_in_file2 || 0, className: 'bg-rose-500' },
+    { label: `Only in ${file1Name}`, value: summary?.only_in_file1 || 0, className: 'bg-amber-500' },
+    { label: `Only in ${file2Name}`, value: summary?.only_in_file2 || 0, className: 'bg-rose-500' },
   ];
 
   return (
@@ -608,19 +615,23 @@ const CATEGORY_OPTIONS = [
   { value: 'auto',       label: 'Auto' },
   { value: 'earnings',   label: 'Earnings' },
   { value: 'allowances', label: 'Allowance' },
-  { value: 'deductions', label: 'Deduction' },
+  { value: 'statutory_deductions', label: 'Statutory Deduction' },
+  { value: 'non_statutory_deductions', label: 'Non-Statutory Deduction' },
+  { value: 'deductions', label: 'Deduction (Unclassified)' },
   { value: 'identity',   label: 'Identity' },
 ];
 
 const CAT_PILL = {
   earnings:   'bg-blue-100 text-blue-700',
   allowances: 'bg-emerald-100 text-emerald-700',
+  statutory_deductions: 'bg-rose-100 text-rose-700',
+  non_statutory_deductions: 'bg-orange-100 text-orange-700',
   deductions: 'bg-red-100 text-red-700',
   identity:   'bg-slate-100 text-slate-600',
   auto:       'bg-slate-100 text-slate-500',
 };
 
-function ColumnClassificationPanel({ mappings, onChangeCategoryOverride }) {
+function ColumnClassificationPanel({ mappings, onChangeCategoryOverride, onChangeThreshold }) {
   if (!mappings || mappings.length === 0) return null;
 
   return (
@@ -637,6 +648,7 @@ function ColumnClassificationPanel({ mappings, onChangeCategoryOverride }) {
               <th className="text-left px-4 py-2 text-xs font-semibold text-slate-500 uppercase tracking-wide hidden sm:table-cell">File 1 Column</th>
               <th className="text-left px-4 py-2 text-xs font-semibold text-slate-500 uppercase tracking-wide hidden sm:table-cell">File 2 Column</th>
               <th className="text-left px-4 py-2 text-xs font-semibold text-slate-500 uppercase tracking-wide">Category</th>
+              <th className="text-left px-4 py-2 text-xs font-semibold text-slate-500 uppercase tracking-wide">Threshold</th>
             </tr>
           </thead>
           <tbody>
@@ -658,6 +670,13 @@ function ColumnClassificationPanel({ mappings, onChangeCategoryOverride }) {
                         <option key={opt.value} value={opt.value}>{opt.label}</option>
                       ))}
                     </select>
+                  </td>
+                  <td className="px-4 py-2.5">
+                    {['currency', 'number', 'numeric'].includes(m.type) ? (
+                      <input type="number" min="0" step="0.01" value={m.threshold ?? ''}
+                        onChange={e => onChangeThreshold(i, e.target.value)} placeholder="Global"
+                        className="input w-24 text-xs py-1" />
+                    ) : <span className="text-xs text-slate-400">N/A</span>}
                   </td>
                 </tr>
               );
@@ -749,13 +768,17 @@ function AuditTypeSelector({ value, onChange }) {
 
 const UNDETECTED_CAT_OPTIONS = [
   { value: 'allowances', label: 'Allowance' },
-  { value: 'deductions', label: 'Deduction' },
+  { value: 'statutory_deductions', label: 'Statutory Deduction' },
+  { value: 'non_statutory_deductions', label: 'Non-Statutory Deduction' },
+  { value: 'deductions', label: 'Deduction (Unclassified)' },
   { value: 'earnings',   label: 'Earning'   },
   { value: 'identity',   label: 'Identity'  },
   { value: 'other',      label: 'Other'     },
 ];
 
 function UndetectedColumnsPanel({ rows, onChange, onAddToAudit, onSaveToConfig, saving }) {
+  const [isExpanded, setIsExpanded] = useState(true);
+
   if (!rows || rows.length === 0) return null;
 
   const anySelected = rows.some(r => r.include);
@@ -763,36 +786,48 @@ function UndetectedColumnsPanel({ rows, onChange, onAddToAudit, onSaveToConfig, 
   return (
     <div className="rounded-xl border border-amber-200 bg-amber-50/60 p-4 space-y-3">
       <div className="flex items-start justify-between gap-2 flex-wrap">
-        <div>
+        <button
+          type="button"
+          onClick={() => setIsExpanded(value => !value)}
+          aria-expanded={isExpanded}
+          className="text-left"
+        >
           <h3 className="text-sm font-semibold text-amber-900">
             Undetected Columns ({rows.length})
           </h3>
           <p className="text-xs text-amber-700 mt-0.5">
+            {isExpanded ? '▾ Hide undetected columns' : '▸ Show undetected columns'}
+          </p>
+        </button>
+        {isExpanded && (
+          <div className="flex gap-2 flex-wrap">
+            <button
+              type="button"
+              disabled={!anySelected}
+              onClick={onAddToAudit}
+              className="btn btn-secondary text-xs disabled:opacity-40"
+            >
+              Add selected to audit
+            </button>
+            <button
+              type="button"
+              disabled={!anySelected || saving}
+              onClick={onSaveToConfig}
+              className="btn btn-primary text-xs disabled:opacity-40"
+            >
+              {saving ? 'Saving…' : 'Save selected to config'}
+            </button>
+          </div>
+        )}
+      </div>
+
+      {isExpanded && (
+        <>
+          <p className="text-xs text-amber-700">
             These columns were not automatically recognized. Select and classify the ones you
             want to include in the audit, then add them or save to config for future auto-detection.
           </p>
-        </div>
-        <div className="flex gap-2 flex-wrap">
-          <button
-            type="button"
-            disabled={!anySelected}
-            onClick={onAddToAudit}
-            className="btn btn-secondary text-xs disabled:opacity-40"
-          >
-            Add selected to audit
-          </button>
-          <button
-            type="button"
-            disabled={!anySelected || saving}
-            onClick={onSaveToConfig}
-            className="btn btn-primary text-xs disabled:opacity-40"
-          >
-            {saving ? 'Saving…' : 'Save selected to config'}
-          </button>
-        </div>
-      </div>
-
-      <div className="rounded-xl border border-amber-200 overflow-hidden bg-white">
+          <div className="rounded-xl border border-amber-200 overflow-hidden bg-white">
         <table className="w-full text-sm">
           <thead>
             <tr className="bg-amber-50 border-b border-amber-200">
@@ -856,7 +891,9 @@ function UndetectedColumnsPanel({ rows, onChange, onAddToAudit, onSaveToConfig, 
             ))}
           </tbody>
         </table>
-      </div>
+          </div>
+        </>
+      )}
     </div>
   );
 }
@@ -1000,6 +1037,421 @@ function ColumnDefsManagerModal({ entries, onClose, onSaveEntry, onReplaceAll })
   );
 }
 
+// ─── Employee Investigation modal ─────────────────────────────────────────────
+
+const RISK_BADGE_CLASSES = {
+  low: 'bg-emerald-100 border-emerald-200 text-emerald-800',
+  medium: 'bg-amber-100 border-amber-200 text-amber-800',
+  high: 'bg-orange-100 border-orange-200 text-orange-800',
+  critical: 'bg-rose-100 border-rose-200 text-rose-800',
+  unknown: 'bg-slate-100 border-slate-200 text-slate-700',
+};
+
+function EmployeeRowTable({ label, row }) {
+  if (!row) {
+    return (
+      <div className="rounded-xl border border-slate-200 bg-slate-50 p-4 text-xs text-slate-500 italic">
+        No row found in {label}.
+      </div>
+    );
+  }
+  const entries = Object.entries(row);
+  return (
+    <div className="rounded-xl border border-slate-200 overflow-hidden">
+      <div className="px-3 py-2 bg-slate-50 border-b border-slate-200 text-xs font-semibold text-slate-700">{label}</div>
+      <div className="max-h-64 overflow-y-auto divide-y divide-slate-100">
+        {entries.map(([key, value]) => (
+          <div key={key} className="flex justify-between gap-3 px-3 py-1.5 text-xs">
+            <span className="text-slate-500 font-medium">{key}</span>
+            <span className="text-slate-900 font-mono text-right">{value === null || value === undefined || value === '' ? '-' : String(value)}</span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function formatIssueName(value) {
+  return String(value || 'Issue')
+    .replace(/[_-]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .replace(/\b\w/g, character => character.toUpperCase());
+}
+
+function formatFileHeader(value) {
+  const filename = String(value || 'File')
+    .replace(/\.[^.]+$/, '')
+    .replace(/[_-]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (filename.length <= 22) return filename;
+  const words = filename.split(' ').filter(Boolean);
+  if (words.length > 1) return words.map(word => word[0]).join('').toUpperCase();
+  return `${filename.slice(0, 19)}...`;
+}
+
+function contextValuesDiffer(source, leftKey, rightKey) {
+  const left = source?.[leftKey] === null || source?.[leftKey] === undefined ? '' : String(source[leftKey]).trim();
+  const right = source?.[rightKey] === null || source?.[rightKey] === undefined ? '' : String(source[rightKey]).trim();
+  return left !== right;
+}
+
+function EmployeeInvestigationModal({
+  employeeIds,
+  activeId,
+  onSelectTab,
+  bundles,
+  issueFields,
+  loadingIds,
+  investigatingIds,
+  onClose,
+  onInvestigate,
+  onInvestigateAll,
+  onExportDifferences,
+  exportingDifferences,
+}) {
+  const [selectedDetectedColumn, setSelectedDetectedColumn] = useState('');
+  const data = bundles?.[activeId];
+  const loading = loadingIds?.has(activeId);
+  const investigating = investigatingIds?.has(activeId);
+  const investigation = data?.investigation;
+  const issues = data?.issues || [];
+  const multiple = employeeIds.length > 1;
+  const issueName = formatIssueName(issueFields?.length === 1 ? issueFields[0] : 'Selected Issue');
+  const file1Header = formatFileHeader(data?.file1_label || 'File 1');
+  const file2Header = formatFileHeader(data?.file2_label || 'File 2');
+
+  const investigationRows = useMemo(() => {
+    const rows = [];
+    for (const employeeId of employeeIds) {
+      const bundle = bundles?.[employeeId];
+      if (!bundle || bundle.error) continue;
+      for (const issue of bundle.issues || []) {
+        const source = issue.source || {};
+        const columnKey = `${source.file1_column || issue.field || ''}||${source.file2_column || issue.field || ''}`;
+        rows.push({ employeeId, bundle, issue, source, columnKey });
+      }
+    }
+    return rows;
+  }, [bundles, employeeIds]);
+
+  const detectedColumnOptions = useMemo(() => {
+    const options = new Map();
+    for (const row of investigationRows) {
+      const file1Column = row.source.file1_column || row.issue.field || '';
+      const file2Column = row.source.file2_column || row.issue.field || '';
+      if (file1Column || file2Column) {
+        options.set(row.columnKey, { file1Column, file2Column });
+      }
+    }
+    return Array.from(options.entries()).sort(([, left], [, right]) =>
+      `${left.file1Column} ${left.file2Column}`.localeCompare(`${right.file1Column} ${right.file2Column}`)
+    );
+  }, [investigationRows]);
+
+  const selectedDetectedColumns = detectedColumnOptions.find(([key]) => key === selectedDetectedColumn)?.[1];
+  const detectedName = formatIssueName(selectedDetectedColumns?.file1Column || selectedDetectedColumns?.file2Column || 'Detected Column');
+
+  const filteredInvestigationRows = useMemo(() => {
+    const byEmployee = new Map();
+    for (const row of investigationRows) {
+      if (!byEmployee.has(row.employeeId)) {
+        byEmployee.set(row.employeeId, { employeeId: row.employeeId, bundle: row.bundle, rows: [] });
+      }
+      byEmployee.get(row.employeeId).rows.push(row);
+    }
+
+    return Array.from(byEmployee.values()).flatMap(candidate => {
+      const issueRow = candidate.rows.find(row => !issueFields?.length || issueFields.includes(row.issue.field));
+      const detectedRow = candidate.rows.find(row => !selectedDetectedColumn || row.columnKey === selectedDetectedColumn);
+      if (!issueRow || !detectedRow) return [];
+      return [{
+        employeeId: candidate.employeeId,
+        bundle: candidate.bundle,
+        issue: issueRow.issue,
+        detected: detectedRow,
+      }];
+    });
+  }, [investigationRows, issueFields, selectedDetectedColumn]);
+
+  useEffect(() => {
+    if (selectedDetectedColumn && !detectedColumnOptions.some(([key]) => key === selectedDetectedColumn)) {
+      setSelectedDetectedColumn('');
+    }
+  }, [detectedColumnOptions, selectedDetectedColumn]);
+
+  function displayValue(value) {
+    return value === null || value === undefined || value === '' ? '-' : String(value);
+  }
+
+  function differenceValue(issue) {
+    return issue?.difference === null || issue?.difference === undefined ? '-' : String(issue.difference);
+  }
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/40">
+      <div className="bg-white rounded-2xl shadow-2xl w-full max-w-6xl h-[calc(100vh-2rem)] max-h-[900px] flex flex-col overflow-hidden" onClick={e => e.stopPropagation()}>
+        <div className="px-6 py-4 border-b border-slate-200 flex flex-wrap items-center justify-between gap-3 shrink-0">
+          <div className="min-w-0">
+            <h2 className="text-base font-semibold text-slate-900">
+              {multiple ? `Investigate ${employeeIds.length} employees` : `Investigate ${data?.employee_name || data?.employee_id || 'Employee'}`}
+            </h2>
+            {!multiple && data?.employee_id && (
+              <p className="text-xs text-slate-500 mt-0.5">ID: {data.employee_id}</p>
+            )}
+          </div>
+          <button type="button" onClick={onClose} className="text-slate-400 hover:text-slate-700 text-xl leading-none">✕</button>
+        </div>
+
+        {multiple && (
+          <div className="px-6 pt-3 pb-2 flex items-start justify-between gap-3 border-b border-slate-100 bg-slate-50/50 shrink-0">
+            <div className="flex flex-wrap gap-1.5 max-h-32 overflow-y-auto flex-1 pr-2">
+              {employeeIds.map(id => {
+                const tabBundle = bundles?.[id];
+                const isActive = id === activeId;
+                return (
+                  <button
+                    key={id}
+                    type="button"
+                    onClick={() => onSelectTab(id)}
+                    className={`mb-1 px-3 py-1.5 rounded-t-lg text-xs font-semibold border-b-2 transition-colors ${
+                      isActive
+                        ? 'border-indigo-500 text-indigo-700 bg-white'
+                        : 'border-transparent text-slate-500 hover:text-slate-700'
+                    }`}
+                  >
+                    {tabBundle?.employee_name || id}
+                    {tabBundle?.investigation && (
+                      <span className="ml-1.5 inline-block w-1.5 h-1.5 rounded-full bg-emerald-500 align-middle" />
+                    )}
+                  </button>
+                );
+              })}
+            </div>
+            <button
+              type="button"
+              onClick={() => onInvestigateAll(employeeIds)}
+              disabled={employeeIds.every(id => investigatingIds?.has(id))}
+              className="btn btn-primary text-xs disabled:opacity-40 whitespace-nowrap"
+            >
+              Investigate All
+            </button>
+            <button
+              type="button"
+              onClick={() => onExportDifferences(employeeIds)}
+              disabled={exportingDifferences || employeeIds.length === 0}
+              className="btn btn-secondary text-xs disabled:opacity-40 whitespace-nowrap"
+            >
+              {exportingDifferences ? 'Exporting...' : 'Export Differences'}
+            </button>
+          </div>
+        )}
+
+        {/* Each tab keeps its own bundle/investigation keyed by employee ID, so data never mixes between employees. */}
+        <div className="overflow-y-auto flex-1 p-6 space-y-5 flex flex-col">
+          {loading || !data ? (
+            <div className="text-sm text-slate-500 italic">Loading employee data…</div>
+          ) : data.error ? (
+            <div className="text-sm text-rose-600 italic">Could not load data for this employee.</div>
+          ) : (
+            <>
+              {/* Flagged issues */}
+              <div className="order-1">
+                <p className="text-xs font-semibold text-slate-500 uppercase tracking-wide mb-2">
+                  Flagged differences ({issues.length})
+                </p>
+                {issues.length === 0 ? (
+                  <p className="text-xs text-slate-500 italic">No flagged differences for this employee.</p>
+                ) : (
+                  <div className="space-y-1.5">
+                    {issues.map(issue => (
+                      <div key={issue.id} className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-xs flex items-center justify-between gap-3">
+                        <div>
+                          <span className="font-semibold text-slate-800">{issue.field}</span>
+                          {(contextValuesDiffer(issue.source, 'file1_grade', 'file2_grade') || contextValuesDiffer(issue.source, 'file1_notch', 'file2_notch')) && (
+                            <div className="text-[10px] text-slate-500 mt-1">
+                              Grade: {displayValue(issue.source?.file1_grade)} → {displayValue(issue.source?.file2_grade)}
+                              {' · '}Notch: {displayValue(issue.source?.file1_notch)} → {displayValue(issue.source?.file2_notch)}
+                            </div>
+                          )}
+                        </div>
+                        <span className="font-mono text-slate-600">{String(issue.old_value ?? '-')} → {String(issue.new_value ?? '-')}</span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+
+              {multiple && (
+                <div className="order-4 rounded-xl border border-indigo-200 bg-white p-4 space-y-3">
+                  <div>
+                    <p className="text-xs font-semibold text-slate-700 uppercase tracking-wide">Difference explorer</p>
+                    <p className="text-xs text-slate-500 mt-0.5">
+                      Showing the selected issue{issueFields?.length === 1 ? `: ${issueFields[0]}` : 's'} from the reconciliation filters. Choose a detected column to compare against it.
+                    </p>
+                  </div>
+                  <div className="grid grid-cols-1 gap-2">
+                    <select value={selectedDetectedColumn} onChange={e => setSelectedDetectedColumn(e.target.value)} className="input text-xs">
+                      <option value="">All detected columns</option>
+                      {detectedColumnOptions.map(([key, columns]) => (
+                        <option key={key} value={key}>{columns.file1Column} / {columns.file2Column}</option>
+                      ))}
+                    </select>
+                  </div>
+                  {selectedDetectedColumn && (
+                    <div className="rounded-lg border border-indigo-100 max-h-80 overflow-auto">
+                      <table className="w-full text-xs min-w-[900px]">
+                        <thead>
+                          <tr className="bg-indigo-50 border-b border-indigo-100 text-left">
+                            <th className="sticky top-0 z-10 bg-indigo-50 px-3 py-2 font-semibold text-indigo-800">Candidate</th>
+                            <th className="sticky top-0 z-10 bg-indigo-50 px-3 py-2 font-semibold text-indigo-800">Issue under review</th>
+                            <th className="sticky top-0 z-10 bg-indigo-50 px-3 py-2 font-semibold text-indigo-800">Detected column</th>
+                            <th className="sticky top-0 z-10 bg-indigo-50 px-3 py-2 font-semibold text-indigo-800">{detectedName} ({file1Header})</th>
+                            <th className="sticky top-0 z-10 bg-indigo-50 px-3 py-2 font-semibold text-indigo-800">{detectedName} ({file2Header})</th>
+                            <th className="sticky top-0 z-10 bg-indigo-50 px-3 py-2 font-semibold text-indigo-800">Detected Difference</th>
+                            <th className="sticky top-0 z-10 bg-indigo-50 px-3 py-2 font-semibold text-indigo-800">{issueName} ({file1Header})</th>
+                            <th className="sticky top-0 z-10 bg-indigo-50 px-3 py-2 font-semibold text-indigo-800">{issueName} ({file2Header})</th>
+                            <th className="sticky top-0 z-10 bg-indigo-50 px-3 py-2 font-semibold text-indigo-800">Issue Difference</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {filteredInvestigationRows.map(row => {
+                            const issueSource = row.issue.source || {};
+                            const detectedSource = row.detected.source || {};
+                            return (
+                              <tr key={row.employeeId} className="border-b border-slate-100 last:border-0 align-top">
+                                <td className="px-3 py-2">
+                                  <button type="button" onClick={() => onSelectTab(row.employeeId)} className="text-left text-indigo-700 hover:text-indigo-900 font-semibold">
+                                    {row.bundle.employee_name || row.employeeId}
+                                  </button>
+                                  <div className="text-slate-500 font-mono">{row.employeeId}</div>
+                                </td>
+                                <td className="px-3 py-2 font-semibold text-slate-700">
+                                  {row.issue.field || '-'}
+                                  <div className="font-normal text-slate-500">{displayValue(issueSource.file1_column)} / {displayValue(issueSource.file2_column)}</div>
+                                </td>
+                                <td className="px-3 py-2 font-semibold text-slate-700">
+                                  {row.detected.issue.field || '-'}
+                                  <div className="font-normal text-slate-500">{displayValue(detectedSource.file1_column)} / {displayValue(detectedSource.file2_column)}</div>
+                                </td>
+                                <td className="px-3 py-2 font-mono text-slate-700">{displayValue(detectedSource.file1_value)}</td>
+                                <td className="px-3 py-2 font-mono text-slate-700">{displayValue(detectedSource.file2_value)}</td>
+                                <td className="px-3 py-2 font-mono text-slate-700">{differenceValue(row.detected.issue)}</td>
+                                <td className="px-3 py-2 font-mono text-slate-700">{displayValue(issueSource.file1_value ?? row.issue.old_value)}</td>
+                                <td className="px-3 py-2 font-mono text-slate-700">{displayValue(issueSource.file2_value ?? row.issue.new_value)}</td>
+                                <td className="px-3 py-2 font-mono text-slate-700">{differenceValue(row.issue)}</td>
+                              </tr>
+                            );
+                          })}
+                          {filteredInvestigationRows.length === 0 && (
+                            <tr><td colSpan="9" className="px-3 py-4 text-center text-slate-500 italic">No candidates match the selected detected column.</td></tr>
+                          )}
+                        </tbody>
+                      </table>
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* Side-by-side rows (all matching rows from each file) */}
+              <div className="order-2 grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div className="space-y-3">
+                  {(data.file1_rows?.length ? data.file1_rows : [null]).map((row, idx) => (
+                    <EmployeeRowTable key={idx} label={`${data.file1_label || 'File 1'}${data.file1_rows?.length > 1 ? ` (row ${idx + 1})` : ''}`} row={row} />
+                  ))}
+                </div>
+                <div className="space-y-3">
+                  {(data.file2_rows?.length ? data.file2_rows : [null]).map((row, idx) => (
+                    <EmployeeRowTable key={idx} label={`${data.file2_label || 'File 2'}${data.file2_rows?.length > 1 ? ` (row ${idx + 1})` : ''}`} row={row} />
+                  ))}
+                </div>
+              </div>
+
+              {/* AI investigation */}
+              <div className="order-3 rounded-xl border border-indigo-200 bg-indigo-50/40 p-4 space-y-3">
+                <div className="flex items-center justify-between">
+                  <p className="text-xs font-semibold text-indigo-800 uppercase tracking-wide">AI Investigation</p>
+                  {investigation && (
+                    <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-semibold border ${RISK_BADGE_CLASSES[investigation.risk_level] || RISK_BADGE_CLASSES.unknown}`}>
+                      {investigation.risk_level || 'unknown'} risk
+                    </span>
+                  )}
+                </div>
+
+                {!investigation ? (
+                  <div className="flex flex-wrap gap-2">
+                    <button
+                      type="button"
+                      onClick={() => onInvestigate(activeId)}
+                      disabled={investigating || issues.length === 0}
+                      className="btn btn-primary text-xs disabled:opacity-40"
+                    >
+                      {investigating ? 'Asking the AI…' : 'Ask AI to explain the difference'}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => onExportDifferences(employeeIds)}
+                      disabled={exportingDifferences || employeeIds.length === 0}
+                      className="btn btn-secondary text-xs disabled:opacity-40"
+                    >
+                      {exportingDifferences ? 'Exporting...' : 'Export Differences'}
+                    </button>
+                  </div>
+                ) : (
+                  <>
+                    {investigation.available === false && investigation.warning && (
+                      <p className="text-[11px] text-amber-700 italic">{investigation.warning}</p>
+                    )}
+                    <p className="text-sm text-slate-800 leading-relaxed">{investigation.explanation}</p>
+
+                    {investigation.root_causes?.length > 0 && (
+                      <div className="space-y-1.5">
+                        {investigation.root_causes.map((cause, idx) => (
+                          <div key={idx} className="rounded-lg border border-white bg-white/70 px-3 py-2 text-xs">
+                            <div className="flex items-center justify-between gap-2">
+                              <span className="font-semibold text-slate-900">{cause.field}</span>
+                              <span className="text-[10px] uppercase tracking-wide text-indigo-600 font-semibold">{cause.category}</span>
+                            </div>
+                            <p className="text-slate-600 mt-0.5">{cause.likely_cause}</p>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+
+                    {investigation.recommended_action && (
+                      <p className="text-xs text-slate-700"><span className="font-semibold">Recommended action:</span> {investigation.recommended_action}</p>
+                    )}
+
+                    <div className="flex flex-wrap gap-2">
+                      <button
+                        type="button"
+                        onClick={() => onInvestigate(activeId)}
+                        disabled={investigating}
+                        className="text-[11px] px-2 py-1 rounded border font-semibold bg-white hover:bg-slate-50 border-slate-200 text-slate-600 disabled:opacity-40 transition-colors"
+                      >
+                        {investigating ? 'Re-running…' : 'Re-run investigation'}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => onExportDifferences(employeeIds)}
+                        disabled={exportingDifferences || employeeIds.length === 0}
+                        className="text-[11px] px-2 py-1 rounded border font-semibold bg-white hover:bg-slate-50 border-slate-200 text-slate-600 disabled:opacity-40 transition-colors"
+                      >
+                        {exportingDifferences ? 'Exporting...' : 'Export Differences'}
+                      </button>
+                    </div>
+                  </>
+                )}
+              </div>
+            </>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ─── Mode tab bar ─────────────────────────────────────────────────────────────
 function ModeTabBar({ mode, onChange }) {
   const tabs = [
@@ -1030,6 +1482,8 @@ export default function Comparison() {
   const [files, setFiles] = useState([]);
   const [file1, setFile1] = useState('');
   const [file2, setFile2] = useState('');
+  const [file1Label, setFile1Label] = useState('');
+  const [file2Label, setFile2Label] = useState('');
   const [file1Columns, setFile1Columns] = useState([]);
   const [file2Columns, setFile2Columns] = useState([]);
   const [loading, setLoading] = useState(false);
@@ -1039,6 +1493,18 @@ export default function Comparison() {
   const [reconciliationActionId, setReconciliationActionId] = useState('');
   const [reconciliationExport, setReconciliationExport] = useState(null);
   const [exportingReconciliation, setExportingReconciliation] = useState(false);
+  const [exportingRoleDifferences, setExportingRoleDifferences] = useState(false);
+  const [exportingInvestigatedDifferences, setExportingInvestigatedDifferences] = useState(false);
+  const [selectedEmployeeIds, setSelectedEmployeeIds] = useState(() => new Set());
+  const [investigateEmployeeIds, setInvestigateEmployeeIds] = useState([]);
+  const [investigateIssueFields, setInvestigateIssueFields] = useState([]);
+  const [investigateActiveId, setInvestigateActiveId] = useState(null);
+  const [investigateBundles, setInvestigateBundles] = useState({});
+  const [investigateLoadingIds, setInvestigateLoadingIds] = useState(() => new Set());
+  const [investigatingIds, setInvestigatingIds] = useState(() => new Set());
+  // Tracks in-flight investigation requests (bundle fetch + AI call) keyed so closing the
+  // modal can abort every pending request instead of letting them keep running unseen.
+  const investigateControllersRef = useRef(new Map());
 
   const [mode,      setMode]      = useState('audit');   // 'audit' | 'column'
   const [auditType, setAuditType] = useState('full');    // 'full' | 'allowances' | 'deductions'
@@ -1046,6 +1512,8 @@ export default function Comparison() {
   const [reconFilter, setReconFilter] = useState('open'); // 'all' | 'open' | 'approved' | 'rejected' | 'ignored'
   const [reconSearch, setReconSearch] = useState('');
   const [reconTypeFilter, setReconTypeFilter] = useState('all');
+  const [reconDifferenceOperator, setReconDifferenceOperator] = useState('any');
+  const [reconDifferenceValue, setReconDifferenceValue] = useState('');
   const [reconPage, setReconPage] = useState(1);
   const [reconPageSize, setReconPageSize] = useState(50);
   const [loadingBulk, setLoadingBulk] = useState(false);
@@ -1114,6 +1582,7 @@ export default function Comparison() {
   useEffect(() => {
     loadFiles();
     loadColumnDefinitions();
+    loadSavedAudit();
   }, []);
 
   useEffect(() => {
@@ -1133,6 +1602,24 @@ export default function Comparison() {
       setFile2Columns([]);
     }
   }, [file2]);
+
+  useEffect(() => {
+    if (file1) {
+      const name = files.find(f => f.id === file1)?.filename || '';
+      setFile1Label(name);
+    } else {
+      setFile1Label('');
+    }
+  }, [file1, files]);
+
+  useEffect(() => {
+    if (file2) {
+      const name = files.find(f => f.id === file2)?.filename || '';
+      setFile2Label(name);
+    } else {
+      setFile2Label('');
+    }
+  }, [file2, files]);
 
   useEffect(() => {
     if (file1Columns.length === 0) return;
@@ -1165,15 +1652,11 @@ export default function Comparison() {
         matchOptions.idCol1, matchOptions.idCol2,
         matchOptions.nameCol1, matchOptions.nameCol2,
       ));
-      setResult(null);
-      setReconciliationRun(null);
     } else {
       const pairKey = `${file1}|${file2}`;
       if (mappingFilePair.current === pairKey) return;
       mappingFilePair.current = pairKey;
       setColumnMappings([createEmptyMapping()]);
-      setResult(null);
-      setReconciliationRun(null);
     }
   }, [file1, file2, file1Columns, file2Columns, auditType, mode, mergedCatalog]); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -1186,8 +1669,6 @@ export default function Comparison() {
       matchOptions.idCol1, matchOptions.idCol2,
       matchOptions.nameCol1, matchOptions.nameCol2,
     ));
-    setResult(null);
-    setReconciliationRun(null);
   }, [auditType]); // eslint-disable-line react-hooks/exhaustive-deps
 
   function addColumnMapping() {
@@ -1220,6 +1701,23 @@ export default function Comparison() {
       setFiles(data.files || []);
     } catch {
       toast.error('Failed to load files');
+    }
+  }
+
+  async function loadSavedAudit() {
+    try {
+      const saved = window.localStorage.getItem(AUDIT_RESULT_STORAGE_KEY);
+      if (saved) setResult(JSON.parse(saved));
+    } catch {
+      window.localStorage.removeItem(AUDIT_RESULT_STORAGE_KEY);
+    }
+
+    try {
+      const data = await listReconciliationRuns();
+      const latestRun = data.runs?.[0];
+      if (latestRun?.id) await refreshReconciliationRun(latestRun.id);
+    } catch {
+      // The saved audit can still render when reconciliation history is unavailable.
     }
   }
 
@@ -1325,10 +1823,16 @@ export default function Comparison() {
         normalize_ids:   matchOptions.normalizeIds,
         keep_digits:     Number(matchOptions.keepDigits) || 5,
         tolerance:       Number(matchOptions.tolerance)  || 0.01,
-        use_ai:          mode === 'audit',
+        use_ai:          false,
         column_roles:    Object.keys(column_roles).length > 0 ? column_roles : null,
+        file1_label:     file1Label || null,
+        file2_label:     file2Label || null,
       });
-      setResult({ type: 'employee-data', ...data });
+      const completedResult = { type: 'employee-data', ...data };
+      setResult(completedResult);
+      if (mode === 'audit') {
+        window.localStorage.setItem(AUDIT_RESULT_STORAGE_KEY, JSON.stringify(completedResult));
+      }
       setReconciliationExport(null);
       if (mode === 'audit' && data.reconciliation_run?.id) {
         await refreshReconciliationRun(data.reconciliation_run.id);
@@ -1351,6 +1855,12 @@ export default function Comparison() {
   function handleCategoryOverride(mappingIndex, category) {
     setAuditMappings(prev => prev.map((m, i) =>
       i === mappingIndex ? { ...m, category } : m
+    ));
+  }
+
+  function handleThresholdOverride(mappingIndex, threshold) {
+    setAuditMappings(prev => prev.map((m, i) =>
+      i === mappingIndex ? { ...m, threshold } : m
     ));
   }
 
@@ -1384,6 +1894,109 @@ export default function Comparison() {
     }
   }
 
+  function toggleEmployeeSelection(employeeId) {
+    if (!employeeId) return;
+    setSelectedEmployeeIds(prev => {
+      const next = new Set(prev);
+      if (next.has(employeeId)) next.delete(employeeId);
+      else next.add(employeeId);
+      return next;
+    });
+  }
+
+  function isRequestCancelled(error) {
+    return error?.code === 'ERR_CANCELED' || error?.name === 'CanceledError';
+  }
+
+  // Opens the investigation modal for one or more employees. Each employee's bundle is
+  // fetched and stored independently, keyed by employee_id, so their data never mixes.
+  async function handleOpenInvestigation(employeeIds) {
+    const runId = reconciliationRun?.id;
+    const ids = Array.from(new Set((Array.isArray(employeeIds) ? employeeIds : [employeeIds]).filter(Boolean)));
+    if (!runId || ids.length === 0) return;
+
+    setInvestigateEmployeeIds(ids);
+    setInvestigateIssueFields(Array.from(new Set(
+      filteredIssues
+        .filter(issue => ids.includes(issue.employee_id))
+        .map(issue => issue.field)
+        .filter(Boolean)
+    )));
+    setInvestigateActiveId(ids[0]);
+    setInvestigateLoadingIds(new Set(ids));
+
+    const entries = await Promise.all(ids.map(async (employeeId) => {
+      const controller = new AbortController();
+      investigateControllersRef.current.set(`bundle:${employeeId}`, controller);
+      try {
+        const bundle = await getEmployeeBundle(runId, employeeId, { signal: controller.signal });
+        return [employeeId, bundle];
+      } catch (error) {
+        if (isRequestCancelled(error)) return [employeeId, null];
+        toast.error(error.response?.data?.detail || `Failed to load data for ${employeeId}`);
+        return [employeeId, { employee_id: employeeId, error: true }];
+      } finally {
+        investigateControllersRef.current.delete(`bundle:${employeeId}`);
+      }
+    }));
+
+    setInvestigateBundles(prev => {
+      const next = { ...prev };
+      for (const [id, bundle] of entries) {
+        if (bundle) next[id] = bundle;
+      }
+      return next;
+    });
+    setInvestigateLoadingIds(new Set());
+  }
+
+  function handleCloseInvestigation() {
+    // Abort every in-flight bundle/AI request so nothing keeps running after the modal closes.
+    for (const controller of investigateControllersRef.current.values()) {
+      controller.abort();
+    }
+    investigateControllersRef.current.clear();
+
+    setInvestigateEmployeeIds([]);
+    setInvestigateIssueFields([]);
+    setInvestigateActiveId(null);
+    setInvestigateBundles({});
+    setInvestigateLoadingIds(new Set());
+    setInvestigatingIds(new Set());
+  }
+
+  // Runs the AI investigation for a single employee and updates only that employee's
+  // entry in the bundle map, keeping every employee's result isolated.
+  async function handleRunInvestigation(employeeId) {
+    const runId = reconciliationRun?.id;
+    if (!runId || !employeeId) return;
+    const controller = new AbortController();
+    investigateControllersRef.current.set(`investigate:${employeeId}`, controller);
+    setInvestigatingIds(prev => new Set(prev).add(employeeId));
+    try {
+      const bundle = await investigateEmployee(runId, employeeId, { signal: controller.signal });
+      setInvestigateBundles(prev => ({ ...prev, [employeeId]: bundle }));
+    } catch (error) {
+      if (!isRequestCancelled(error)) {
+        toast.error(error.response?.data?.detail || `AI investigation failed for ${employeeId}`);
+      }
+    } finally {
+      investigateControllersRef.current.delete(`investigate:${employeeId}`);
+      setInvestigatingIds(prev => {
+        const next = new Set(prev);
+        next.delete(employeeId);
+        return next;
+      });
+    }
+  }
+
+  // Fires one independent AI call per employee (in parallel); each result lands only
+  // in that employee's own bundle entry so results never bleed across employees.
+  async function handleRunInvestigationAll(employeeIds) {
+    await Promise.all((employeeIds || []).map(id => handleRunInvestigation(id)));
+  }
+
+
   async function handleExportApprovedUpdates() {
     const runId = reconciliationRun?.id;
     if (!runId) return;
@@ -1399,10 +2012,51 @@ export default function Comparison() {
     }
   }
 
+  async function handleExportRoleDifferences() {
+    const runId = reconciliationRun?.id;
+    if (!runId) return;
+    setExportingRoleDifferences(true);
+    try {
+      const data = await exportRoleDifferences(runId);
+      setReconciliationExport(data);
+      const file = data.files?.role_differences;
+      if (file?.file_id) {
+        window.open(downloadCsv(file.file_id, 'role_differences.csv'), '_blank');
+      }
+      toast.success(`Generated ${data.role_differences || 0} role difference record(s)`);
+    } catch (error) {
+      toast.error(error.response?.data?.detail || 'Failed to export role differences');
+    } finally {
+      setExportingRoleDifferences(false);
+    }
+  }
+
+  async function handleExportInvestigatedDifferences(employeeIds) {
+    const runId = reconciliationRun?.id;
+    const ids = Array.from(new Set((Array.isArray(employeeIds) ? employeeIds : [employeeIds]).filter(Boolean)));
+    if (!runId || ids.length === 0) return;
+
+    setExportingInvestigatedDifferences(true);
+    try {
+      const data = await exportInvestigatedDifferences(runId, ids);
+      const file = data.files?.investigated_differences;
+      if (file?.file_id) {
+        window.open(downloadCsv(file.file_id, 'investigated_differences.csv'), '_blank');
+        toast.success(`Generated ${data.differences || 0} investigated difference record(s)`);
+      } else {
+        toast.info('No investigated differences found to export');
+      }
+    } catch (error) {
+      toast.error(error.response?.data?.detail || 'Failed to export investigated differences');
+    } finally {
+      setExportingInvestigatedDifferences(false);
+    }
+  }
+
   const selectedFileNames = useMemo(() => ({
-    fileA: files.find(f => f.id === file1)?.filename,
-    fileB: files.find(f => f.id === file2)?.filename,
-  }), [files, file1, file2]);
+    fileA: file1Label || files.find(f => f.id === file1)?.filename || 'File 1',
+    fileB: file2Label || files.find(f => f.id === file2)?.filename || 'File 2',
+  }), [files, file1, file2, file1Label, file2Label]);
 
   const previewColumns = useMemo(() => {
     const fileAName = selectedFileNames.fileA || 'File 1';
@@ -1512,6 +2166,17 @@ export default function Comparison() {
     if (reconTypeFilter !== 'all') {
       list = list.filter(i => i.issue_type === reconTypeFilter);
     }
+    const differenceValue = Math.abs(Number(reconDifferenceValue));
+    if (reconDifferenceOperator !== 'any' && reconDifferenceValue !== '' && Number.isFinite(differenceValue)) {
+      list = list.filter(i => {
+        if (i.difference === null || i.difference === undefined || i.difference === '') return false;
+        const difference = Math.abs(Number(i.difference));
+        if (!Number.isFinite(difference)) return false;
+        if (reconDifferenceOperator === 'greater_than') return difference > differenceValue;
+        if (reconDifferenceOperator === 'less_than') return difference < differenceValue;
+        return Math.abs(difference - differenceValue) < 0.005;
+      });
+    }
     if (reconSearch.trim()) {
       const q = reconSearch.toLowerCase().trim();
       list = list.filter(i => 
@@ -1522,7 +2187,7 @@ export default function Comparison() {
       );
     }
     return list;
-  }, [reconciliationRun, reconFilter, reconTypeFilter, reconSearch]);
+  }, [reconciliationRun, reconFilter, reconTypeFilter, reconSearch, reconDifferenceOperator, reconDifferenceValue]);
 
   const visibleReconciliationIssues = useMemo(() => {
     const start = (reconPage - 1) * reconPageSize;
@@ -1552,6 +2217,7 @@ export default function Comparison() {
   }
 
   const approvedIssueCount = reconciliationRun?.status_counts?.approved || 0;
+  const roleDifferenceCount = reconciliationRun?.type_counts?.rank_change || 0;
   const canRun = file1 && file2 && matchOptions.idCol1 && matchOptions.idCol2 && activeMappings.length > 0;
 
   return (
@@ -1571,8 +2237,6 @@ export default function Comparison() {
           mode={mode}
           onChange={next => {
             setMode(next);
-            setResult(null);
-            setReconciliationRun(null);
             mappingFilePair.current = '';
           }}
         />
@@ -1593,11 +2257,22 @@ export default function Comparison() {
             <div className="space-y-3 rounded-xl border border-slate-200 bg-slate-50/50 p-4">
               <p className="text-xs font-semibold uppercase tracking-widest text-slate-500">File 1</p>
               <FormField label="Payroll file" tooltip="The first payroll export.">
-                <select value={file1} onChange={e => { setFile1(e.target.value); setResult(null); mappingFilePair.current = ''; }} className="input">
+                <select value={file1} onChange={e => { setFile1(e.target.value); mappingFilePair.current = ''; }} className="input">
                   <option value="">Select file…</option>
                   {files.map(f => <option key={f.id} value={f.id}>{f.filename}</option>)}
                 </select>
               </FormField>
+              {file1 && (
+                <FormField label="Custom File Label" tooltip="Label used for this file in reports.">
+                  <input
+                    type="text"
+                    value={file1Label}
+                    onChange={e => setFile1Label(e.target.value)}
+                    className="input text-xs"
+                    placeholder="e.g. HR File"
+                  />
+                </FormField>
+              )}
               <FormField label="Employee ID column" tooltip="Column that uniquely identifies each employee in this file.">
                 <select value={matchOptions.idCol1} onChange={e => setMatchOptions(prev => ({ ...prev, idCol1: e.target.value }))} className="input">
                   <option value="">Select ID column…</option>
@@ -1618,11 +2293,22 @@ export default function Comparison() {
             <div className="space-y-3 rounded-xl border border-slate-200 bg-slate-50/50 p-4">
               <p className="text-xs font-semibold uppercase tracking-widest text-slate-500">File 2</p>
               <FormField label="Payroll file" tooltip="The second payroll export.">
-                <select value={file2} onChange={e => { setFile2(e.target.value); setResult(null); mappingFilePair.current = ''; }} className="input">
+                <select value={file2} onChange={e => { setFile2(e.target.value); mappingFilePair.current = ''; }} className="input">
                   <option value="">Select file…</option>
                   {files.map(f => <option key={f.id} value={f.id}>{f.filename}</option>)}
                 </select>
               </FormField>
+              {file2 && (
+                <FormField label="Custom File Label" tooltip="Label used for this file in reports.">
+                  <input
+                    type="text"
+                    value={file2Label}
+                    onChange={e => setFile2Label(e.target.value)}
+                    className="input text-xs"
+                    placeholder="e.g. Payroll File"
+                  />
+                </FormField>
+              )}
               <FormField label="Employee ID column" tooltip="Must correspond to the same employees as File 1.">
                 <select value={matchOptions.idCol2} onChange={e => setMatchOptions(prev => ({ ...prev, idCol2: e.target.value }))} className="input">
                   <option value="">Select ID column…</option>
@@ -1722,6 +2408,7 @@ export default function Comparison() {
                   <ColumnClassificationPanel
                     mappings={auditMappings}
                     onChangeCategoryOverride={handleCategoryOverride}
+                    onChangeThreshold={handleThresholdOverride}
                   />
                 )}
               </div>
@@ -1877,10 +2564,10 @@ export default function Comparison() {
 
           {/* Summary metrics — both modes */}
           <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-3">
-            <MetricCard title="Matched Employees"          value={formatNumber(result.summary.matched)}                       subtitle={`${selectedFileNames.fileA || 'File 1'} vs ${selectedFileNames.fileB || 'File 2'}`} tone="blue"  />
+            <MetricCard title="Matched Employees"          value={formatNumber(result.summary.matched)}                       subtitle={`${selectedFileNames.fileA} vs ${selectedFileNames.fileB}`} tone="blue"  />
             <MetricCard title="Employees With Differences" value={formatNumber(result.summary.employees_with_differences)}    subtitle={`${formatNumber(result.summary.field_differences)} field-level mismatches`}               tone="amber" />
-            <MetricCard title="Only In File 1"             value={formatNumber(result.summary.only_in_file1)}                 subtitle="Employees missing from File 2"                                                         tone="rose"  />
-            <MetricCard title="Only In File 2"             value={formatNumber(result.summary.only_in_file2)}                 subtitle="Employees missing from File 1"                                                         tone="green" />
+            <MetricCard title={`Only In ${selectedFileNames.fileA}`}             value={formatNumber(result.summary.only_in_file1)}                 subtitle={`Employees missing from ${selectedFileNames.fileB}`}                                                         tone="rose"  />
+            <MetricCard title={`Only In ${selectedFileNames.fileB}`}             value={formatNumber(result.summary.only_in_file2)}                 subtitle={`Employees missing from ${selectedFileNames.fileA}`}                                                         tone="green" />
           </div>
 
           {/* ── Audit-mode results ─────────────────────────────────────────── */}
@@ -1897,7 +2584,38 @@ export default function Comparison() {
                     <h2 className="text-sm font-medium text-slate-900">Coverage Across Both Files</h2>
                     <p className="text-xs text-slate-500 mt-1">Shared employees versus records found in only one file.</p>
                   </div>
-                  <StackedPresenceBar summary={result.summary} />
+                  <StackedPresenceBar summary={result.summary} file1Name={selectedFileNames.fileA} file2Name={selectedFileNames.fileB} />
+                  {[1, 2].map(fileNumber => {
+                    const count = result.summary?.[`missing_basic_salary_count_file${fileNumber}`] || 0;
+                    if (!count) return null;
+                    const rows = result[`missing_basic_salary_sample_file${fileNumber}`] || [];
+                    const fileLabel = fileNumber === 1 ? selectedFileNames.fileA : selectedFileNames.fileB;
+                    const download = result.files_created?.[`missing_basic_salary_file${fileNumber}`];
+                    return (
+                      <div key={fileNumber} className="pt-4 border-t border-rose-200 space-y-3">
+                        <div className="flex justify-between items-start gap-3">
+                          <div>
+                            <h3 className="text-sm font-semibold text-rose-800 flex items-center gap-1.5">
+                              <span>⚠</span> Flagged: Blank Basic Salary in {fileLabel}
+                            </h3>
+                            <p className="text-xs text-slate-500 mt-1">
+                              {count} row{count === 1 ? '' : 's'} have a blank or zero basic salary. Every flagged row is available in the CSV download.
+                            </p>
+                          </div>
+                          {download && <button onClick={() => handleDownloadResult(download)} className="text-[10px] text-indigo-600 hover:text-indigo-800 font-semibold whitespace-nowrap">Download CSV</button>}
+                        </div>
+                        <div className="max-h-48 overflow-y-auto text-xs divide-y divide-slate-100 bg-white rounded-lg border border-rose-200 px-3">
+                          {rows.map((row, index) => (
+                            <div key={`${row.employee_id}-${index}`} className="py-1.5 flex justify-between gap-2">
+                              <span className="font-mono text-slate-500">{row.employee_id || 'No ID'}</span>
+                              <span className="font-medium text-slate-700">{row.employee_name || '—'}</span>
+                              <span className="text-rose-600 font-mono">{row.basic_salary ?? 'Blank'}</span>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    );
+                  })}
                 </div>
 
                 <div className="card p-4 space-y-3">
@@ -1931,16 +2649,80 @@ export default function Comparison() {
                   <FieldImpactChart fieldSummary={result.analytics?.field_summary} />
                 </div>
                 <div className="space-y-4">
-                  <PresenceList title="Only In File 1" rows={result.presence_preview?.only_in_file1} tone="amber" />
-                  <PresenceList title="Only In File 2" rows={result.presence_preview?.only_in_file2} tone="green" />
+                  <PresenceList title={`Only In ${selectedFileNames.fileA}`} rows={result.presence_preview?.only_in_file1} tone="amber" />
+                  <PresenceList title={`Only In ${selectedFileNames.fileB}`} rows={result.presence_preview?.only_in_file2} tone="green" />
                 </div>
               </div>
+
+              {(result.summary?.missing_id_count_file1 > 0 || result.summary?.missing_id_count_file2 > 0) && (
+                <div className="card p-5 space-y-4 border-amber-200 bg-amber-50/20">
+                  <div>
+                    <h2 className="text-sm font-semibold text-slate-900 flex items-center gap-1.5 text-amber-800">
+                      <span>⚠</span> Employees with Missing or Invalid IDs
+                    </h2>
+                    <p className="text-xs text-slate-500 mt-1">
+                      These rows were excluded from comparison because their ID column was blank or could not be normalized.
+                    </p>
+                  </div>
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                    {result.summary.missing_id_count_file1 > 0 && (
+                      <div className="space-y-2 bg-white p-3 rounded-lg border border-slate-200">
+                        <div className="flex justify-between items-center">
+                          <h3 className="text-xs font-semibold text-slate-800">{selectedFileNames.fileA} ({result.summary.missing_id_count_file1} rows)</h3>
+                          {result.files_created?.missing_ids_file1 && (
+                            <button
+                              onClick={() => handleDownloadResult(result.files_created.missing_ids_file1)}
+                              className="text-[10px] text-indigo-600 hover:text-indigo-800 font-semibold"
+                            >
+                              Download CSV
+                            </button>
+                          )}
+                        </div>
+                        <div className="max-h-48 overflow-y-auto text-xs divide-y divide-slate-100">
+                          {result.missing_id_sample_file1?.map((row, i) => (
+                            <div key={i} className="py-1 flex justify-between">
+                              <span className="text-slate-400">Row {row.row_number}</span>
+                              <span className="font-medium text-slate-700">{row.name || '—'}</span>
+                              <span className="text-slate-400 font-mono">ID: {row.raw_id_value !== null ? String(row.raw_id_value) : 'None'}</span>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+
+                    {result.summary.missing_id_count_file2 > 0 && (
+                      <div className="space-y-2 bg-white p-3 rounded-lg border border-slate-200">
+                        <div className="flex justify-between items-center">
+                          <h3 className="text-xs font-semibold text-slate-800">{selectedFileNames.fileB} ({result.summary.missing_id_count_file2} rows)</h3>
+                          {result.files_created?.missing_ids_file2 && (
+                            <button
+                              onClick={() => handleDownloadResult(result.files_created.missing_ids_file2)}
+                              className="text-[10px] text-indigo-600 hover:text-indigo-800 font-semibold"
+                            >
+                              Download CSV
+                            </button>
+                          )}
+                        </div>
+                        <div className="max-h-48 overflow-y-auto text-xs divide-y divide-slate-100">
+                          {result.missing_id_sample_file2?.map((row, i) => (
+                            <div key={i} className="py-1 flex justify-between">
+                              <span className="text-slate-400">Row {row.row_number}</span>
+                              <span className="font-medium text-slate-700">{row.name || '—'}</span>
+                              <span className="text-slate-400 font-mono">ID: {row.raw_id_value !== null ? String(row.raw_id_value) : 'None'}</span>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              )}
 
               {(result.duplicate_id_samples?.file1?.length > 0 || result.duplicate_id_samples?.file2?.length > 0) && (
                 <div className="card p-4 space-y-2">
                   <h2 className="text-sm font-medium text-slate-900">Duplicate ID Samples</h2>
-                  {result.duplicate_id_samples.file1?.length > 0 && <p className="text-xs text-slate-600">File 1: {result.duplicate_id_samples.file1.join(', ')}</p>}
-                  {result.duplicate_id_samples.file2?.length > 0 && <p className="text-xs text-slate-600">File 2: {result.duplicate_id_samples.file2.join(', ')}</p>}
+                  {result.duplicate_id_samples.file1?.length > 0 && <p className="text-xs text-slate-600">{selectedFileNames.fileA}: {result.duplicate_id_samples.file1.join(', ')}</p>}
+                  {result.duplicate_id_samples.file2?.length > 0 && <p className="text-xs text-slate-600">{selectedFileNames.fileB}: {result.duplicate_id_samples.file2.join(', ')}</p>}
                 </div>
               )}
 
@@ -2001,6 +2783,13 @@ export default function Comparison() {
                       >
                         {exportingReconciliation ? 'Exporting…' : 'Export Approved HR Updates'}
                       </button>
+                      <button
+                        onClick={handleExportRoleDifferences}
+                        disabled={exportingRoleDifferences || roleDifferenceCount === 0}
+                        className="btn btn-secondary text-xs disabled:opacity-40"
+                      >
+                        {exportingRoleDifferences ? 'Exporting...' : `Export Role Differences (${roleDifferenceCount})`}
+                      </button>
                     </div>
                   </div>
 
@@ -2023,20 +2812,73 @@ export default function Comparison() {
                         className="input text-xs w-full sm:w-52 py-1.5"
                       >
                         <option value="all">All Issue Types</option>
-                        <option value="salary_change">Salary Changes</option>
+                        <option value="basic_salary_change">Basic Salary Changes</option>
+                        <option value="annual_salary_change">Annual Salary Changes</option>
+                        <option value="take_home_change">Take Home Changes</option>
+                        <option value="salary_change">Other Salary Changes</option>
+                        <option value="allowance_change">Allowance Changes</option>
+                        <option value="statutory_deduction_change">Statutory Deduction Changes</option>
+                        <option value="non_statutory_deduction_change">Non-Statutory Deduction Changes</option>
+                        <option value="deduction_change">Deduction Changes</option>
                         <option value="rank_change">Rank / Grade Changes</option>
                         <option value="branch_change">Branch Changes</option>
                         <option value="potential_new_hire">New Hires</option>
                         <option value="potential_resignation">Resignations</option>
-                        <option value="allowance_or_deduction_change">Allowance / Deduction Changes</option>
                         <option value="field_mismatch">Other Field Mismatches</option>
                       </select>
+
+                      <select
+                        value={reconDifferenceOperator}
+                        onChange={e => { setReconDifferenceOperator(e.target.value); setReconPage(1); }}
+                        className="input text-xs w-40 py-1.5"
+                      >
+                        <option value="any">Any difference</option>
+                        <option value="greater_than">Difference greater than</option>
+                        <option value="less_than">Difference less than</option>
+                        <option value="equal_to">Difference equal to</option>
+                      </select>
+
+                      {reconDifferenceOperator !== 'any' && (
+                        <input
+                          type="number"
+                          step="0.01"
+                          min="0"
+                          value={reconDifferenceValue}
+                          onChange={e => { setReconDifferenceValue(e.target.value); setReconPage(1); }}
+                          placeholder="Difference value"
+                          className="input text-xs w-36 py-1.5"
+                        />
+                      )}
                     </div>
 
                     <div className="text-xs text-slate-500 font-semibold">
                       Found {filteredIssues.length} matching issues
                     </div>
                   </div>
+
+                  {selectedEmployeeIds.size > 0 && (
+                    <div className="bg-indigo-50/60 px-5 py-2.5 flex flex-wrap items-center justify-between gap-2">
+                      <div className="text-xs font-semibold text-indigo-900">
+                        {selectedEmployeeIds.size} employee(s) selected
+                      </div>
+                      <div className="flex gap-1.5">
+                        <button
+                          type="button"
+                          onClick={() => handleOpenInvestigation(Array.from(selectedEmployeeIds))}
+                          className="text-xs px-2.5 py-1.5 rounded-lg border font-semibold bg-indigo-600 hover:bg-indigo-700 border-indigo-600 text-white transition-colors shadow-sm"
+                        >
+                          Investigate Selected
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setSelectedEmployeeIds(new Set())}
+                          className="text-xs px-2.5 py-1.5 rounded-lg border font-semibold bg-white hover:bg-slate-50 border-slate-200 text-slate-600 transition-colors"
+                        >
+                          Clear
+                        </button>
+                      </div>
+                    </div>
+                  )}
 
                   {/* Bulk Action panel */}
                   {filteredIssues.length > 0 && (
@@ -2101,6 +2943,21 @@ export default function Comparison() {
                     <table className="data-table">
                       <thead>
                         <tr>
+                          <th className="w-8">
+                            <input
+                              type="checkbox"
+                              checked={visibleReconciliationIssues.length > 0 && visibleReconciliationIssues.every(i => selectedEmployeeIds.has(i.employee_id))}
+                              onChange={() => {
+                                const visibleIds = visibleReconciliationIssues.map(i => i.employee_id).filter(Boolean);
+                                const allSelected = visibleIds.every(id => selectedEmployeeIds.has(id));
+                                setSelectedEmployeeIds(prev => {
+                                  const next = new Set(prev);
+                                  visibleIds.forEach(id => allSelected ? next.delete(id) : next.add(id));
+                                  return next;
+                                });
+                              }}
+                            />
+                          </th>
                           <th>Status</th>
                           <th>Issue</th>
                           <th>Employee</th>
@@ -2134,6 +2991,14 @@ export default function Comparison() {
 
                           return (
                             <tr key={issue.id}>
+                              <td>
+                                <input
+                                  type="checkbox"
+                                  disabled={!issue.employee_id}
+                                  checked={!!issue.employee_id && selectedEmployeeIds.has(issue.employee_id)}
+                                  onChange={() => toggleEmployeeSelection(issue.employee_id)}
+                                />
+                              </td>
                               <td>
                                 <span className={statusBadgeClass}>
                                   {issue.status}
@@ -2173,6 +3038,13 @@ export default function Comparison() {
                               </td>
                               <td>
                                 <div className="flex flex-wrap gap-1">
+                                  <button
+                                    onClick={() => handleOpenInvestigation(issue.employee_id)}
+                                    disabled={!issue.employee_id}
+                                    className="text-[11px] px-2 py-1 rounded border font-semibold bg-indigo-50 hover:bg-indigo-100/80 border-indigo-200 text-indigo-700 disabled:opacity-40 transition-colors shadow-sm"
+                                  >
+                                    Investigate
+                                  </button>
                                   {issue.status !== 'approved' && (
                                     <button
                                       onClick={() => handleReconciliationAction(issue.id, 'approve')}
@@ -2215,7 +3087,7 @@ export default function Comparison() {
                           );
                         })}
                         {visibleReconciliationIssues.length === 0 && (
-                          <tr><td colSpan={9} className="text-center py-6 text-sm text-slate-500">No reconciliation issues found.</td></tr>
+                          <tr><td colSpan={10} className="text-center py-6 text-sm text-slate-500">No reconciliation issues found.</td></tr>
                         )}
                       </tbody>
                     </table>
@@ -2303,20 +3175,18 @@ export default function Comparison() {
           )}
 
           {/* Differences table — both modes */}
+          {mode !== 'audit' && (
           <div className="card p-4">
             <div className="flex items-center justify-between gap-4 mb-3">
               <div>
-                <h2 className="text-sm font-medium text-slate-900">
-                  {mode === 'audit' ? 'Preview of Payroll Differences' : 'Column Differences'}
-                </h2>
-                <p className="text-xs text-slate-500 mt-1">
-                  {mode === 'audit' ? 'Top mismatches from your selected audit fields.' : 'Rows where the compared columns differ.'}
-                </p>
+                <h2 className="text-sm font-medium text-slate-900">Column Differences</h2>
+                <p className="text-xs text-slate-500 mt-1">Rows where the compared columns differ.</p>
               </div>
               <span className="badge badge-gray">{formatNumber(result.preview_differences?.length || 0)} preview rows</span>
             </div>
             <DataTable data={result.preview_differences || []} columns={previewColumns} allowHorizontalScroll={true} />
           </div>
+          )}
         </div>
       )}
 
@@ -2330,6 +3200,24 @@ export default function Comparison() {
             await replaceColumnDefinitions(defs);
             await loadColumnDefinitions();
           }}
+        />
+      )}
+
+      {/* ── Employee Investigation modal ────────────────────────────────────── */}
+      {investigateEmployeeIds.length > 0 && (
+        <EmployeeInvestigationModal
+          employeeIds={investigateEmployeeIds}
+          activeId={investigateActiveId}
+          onSelectTab={setInvestigateActiveId}
+          bundles={investigateBundles}
+          issueFields={investigateIssueFields}
+          loadingIds={investigateLoadingIds}
+          investigatingIds={investigatingIds}
+          onClose={handleCloseInvestigation}
+          onInvestigate={handleRunInvestigation}
+          onInvestigateAll={handleRunInvestigationAll}
+          onExportDifferences={handleExportInvestigatedDifferences}
+          exportingDifferences={exportingInvestigatedDifferences}
         />
       )}
     </div>
