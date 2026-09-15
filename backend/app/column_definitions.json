@@ -464,7 +464,7 @@
         "staff id"
       ],
       "category": "identity",
-      "type": "currency"
+      "type": "text"
     },
     {
       "label": "NATIONAL ID",
@@ -472,7 +472,7 @@
         "national id"
       ],
       "category": "identity",
-      "type": "currency"
+      "type": "text"
     },
     {
       "label": "SSNIT Number",
@@ -492,7 +492,7 @@
         "account number"
       ],
       "category": "other",
-      "type": "currency"
+      "type": "text"
     },
     {
       "label": "Name",
@@ -513,7 +513,7 @@
         "branch"
       ],
       "category": "other",
-      "type": "currency"
+      "type": "text"
     },
     {
       "label": "POSITION",
@@ -521,7 +521,7 @@
         "position"
       ],
       "category": "other",
-      "type": "currency"
+      "type": "text"
     },
     {
       "label": "GRADE",
@@ -529,7 +529,7 @@
         "grade"
       ],
       "category": "other",
-      "type": "currency"
+      "type": "text"
     },
     {
       "label": "Department",
@@ -548,7 +548,7 @@
         "notch"
       ],
       "category": "other",
-      "type": "currency"
+      "type": "text"
     },
     {
       "label": "OLD ANNUAL SALARIES",

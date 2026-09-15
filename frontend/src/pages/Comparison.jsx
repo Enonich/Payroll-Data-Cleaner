@@ -285,9 +285,10 @@ function FieldImpactChart({ fieldSummary }) {
     <div className="space-y-3">
       {items.map((item) => {
         const value = item.total_abs_difference || item.mismatch_count || 0;
+        const valueLabel = item.total_abs_difference !== undefined ? formatCurrency(item.total_abs_difference) : formatNumber(item.mismatch_count);
         return (
-          <div key={item.field} className="grid grid-cols-[minmax(0,1fr)_96px] gap-3 items-center">
-            <div>
+          <div key={item.field} className="grid grid-cols-[minmax(0,1fr)_minmax(0,110px)] gap-3 items-center">
+            <div className="min-w-0">
               <div className="flex items-center justify-between gap-3 mb-1">
                 <span className="text-sm font-medium text-slate-800 truncate">{item.field}</span>
                 <span className="text-xs text-slate-500">{formatNumber(item.affected_employees)} emp.</span>
@@ -299,9 +300,9 @@ function FieldImpactChart({ fieldSummary }) {
                 />
               </div>
             </div>
-            <div className="text-right">
-              <div className="text-sm font-semibold text-slate-800">
-                {item.total_abs_difference !== undefined ? formatCurrency(item.total_abs_difference) : formatNumber(item.mismatch_count)}
+            <div className="text-right min-w-0">
+              <div className="text-sm font-semibold text-slate-800 truncate" title={valueLabel}>
+                {valueLabel}
               </div>
               <div className="text-[11px] text-slate-500">
                 {formatNumber(item.mismatch_count)} mismatches
@@ -1091,12 +1092,6 @@ function formatFileHeader(value) {
   return `${filename.slice(0, 19)}...`;
 }
 
-function contextValuesDiffer(source, leftKey, rightKey) {
-  const left = source?.[leftKey] === null || source?.[leftKey] === undefined ? '' : String(source[leftKey]).trim();
-  const right = source?.[rightKey] === null || source?.[rightKey] === undefined ? '' : String(source[rightKey]).trim();
-  return left !== right;
-}
-
 function EmployeeInvestigationModal({
   employeeIds,
   activeId,
@@ -1243,7 +1238,7 @@ function EmployeeInvestigationModal({
               disabled={exportingDifferences || employeeIds.length === 0}
               className="btn btn-secondary text-xs disabled:opacity-40 whitespace-nowrap"
             >
-              {exportingDifferences ? 'Exporting...' : 'Export Differences'}
+              {exportingDifferences ? 'Exporting...' : 'Export Investigation (3 CSVs)'}
             </button>
           </div>
         )}
@@ -1265,20 +1260,40 @@ function EmployeeInvestigationModal({
                   <p className="text-xs text-slate-500 italic">No flagged differences for this employee.</p>
                 ) : (
                   <div className="space-y-1.5">
-                    {issues.map(issue => (
-                      <div key={issue.id} className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-xs flex items-center justify-between gap-3">
-                        <div>
-                          <span className="font-semibold text-slate-800">{issue.field}</span>
-                          {(contextValuesDiffer(issue.source, 'file1_grade', 'file2_grade') || contextValuesDiffer(issue.source, 'file1_notch', 'file2_notch')) && (
-                            <div className="text-[10px] text-slate-500 mt-1">
-                              Grade: {displayValue(issue.source?.file1_grade)} → {displayValue(issue.source?.file2_grade)}
-                              {' · '}Notch: {displayValue(issue.source?.file1_notch)} → {displayValue(issue.source?.file2_notch)}
+                    {issues.map(issue => {
+                      const isInvestigating = issueFields?.includes(issue.field);
+                      const hasDifference = issue.difference !== null && issue.difference !== undefined && !Number.isNaN(Number(issue.difference));
+                      const diffValue = hasDifference ? Number(issue.difference) : 0;
+                      return (
+                        <div
+                          key={issue.id}
+                          className={`rounded-lg border px-3 py-2 text-xs flex items-center justify-between gap-3 ${
+                            isInvestigating
+                              ? 'border-indigo-300 bg-indigo-50 ring-1 ring-indigo-200'
+                              : 'border-slate-200 bg-slate-50'
+                          }`}
+                        >
+                          <span className={`font-semibold flex items-center gap-1.5 ${isInvestigating ? 'text-indigo-900' : 'text-slate-800'}`}>
+                            {issue.field}
+                            {isInvestigating && (
+                              <span className="text-[9px] font-bold uppercase tracking-wide text-indigo-600 bg-indigo-100 rounded-full px-1.5 py-0.5">
+                                Investigating
+                              </span>
+                            )}
+                          </span>
+                          <div className="text-right">
+                            <div className={`font-mono ${isInvestigating ? 'text-indigo-700' : 'text-slate-600'}`}>
+                              {String(issue.old_value ?? '-')} → {String(issue.new_value ?? '-')}
                             </div>
-                          )}
+                            {hasDifference && (
+                              <div className={`font-mono text-[10px] mt-0.5 ${diffValue > 0 ? 'text-emerald-600' : diffValue < 0 ? 'text-rose-600' : 'text-slate-400'}`}>
+                                {diffValue > 0 ? '+' : ''}{formatCurrency(diffValue)}
+                              </div>
+                            )}
+                          </div>
                         </div>
-                        <span className="font-mono text-slate-600">{String(issue.old_value ?? '-')} → {String(issue.new_value ?? '-')}</span>
-                      </div>
-                    ))}
+                      );
+                    })}
                   </div>
                 )}
               </div>
@@ -1395,7 +1410,7 @@ function EmployeeInvestigationModal({
                       disabled={exportingDifferences || employeeIds.length === 0}
                       className="btn btn-secondary text-xs disabled:opacity-40"
                     >
-                      {exportingDifferences ? 'Exporting...' : 'Export Differences'}
+                      {exportingDifferences ? 'Exporting...' : 'Export Investigation (3 CSVs)'}
                     </button>
                   </div>
                 ) : (
@@ -1438,7 +1453,7 @@ function EmployeeInvestigationModal({
                         disabled={exportingDifferences || employeeIds.length === 0}
                         className="text-[11px] px-2 py-1 rounded border font-semibold bg-white hover:bg-slate-50 border-slate-200 text-slate-600 disabled:opacity-40 transition-colors"
                       >
-                        {exportingDifferences ? 'Exporting...' : 'Export Differences'}
+                        {exportingDifferences ? 'Exporting...' : 'Export Investigation (3 CSVs)'}
                       </button>
                     </div>
                   </>
@@ -1486,6 +1501,8 @@ export default function Comparison() {
   const [file2Label, setFile2Label] = useState('');
   const [file1Columns, setFile1Columns] = useState([]);
   const [file2Columns, setFile2Columns] = useState([]);
+  const [file1ColumnsFileId, setFile1ColumnsFileId] = useState('');
+  const [file2ColumnsFileId, setFile2ColumnsFileId] = useState('');
   const [loading, setLoading] = useState(false);
   const [result, setResult] = useState(null);
   const [errorDetails, setErrorDetails] = useState(null);
@@ -1586,21 +1603,33 @@ export default function Comparison() {
   }, []);
 
   useEffect(() => {
+    let cancelled = false;
+    setFile1Columns([]);
+    setFile1ColumnsFileId('');
+    setMatchOptions(prev => ({ ...prev, idCol1: '', nameCol1: '' }));
     if (file1) {
-      loadFileColumns(file1, setFile1Columns);
-      setMatchOptions(prev => ({ ...prev, idCol1: '', nameCol1: '' }));
-    } else {
-      setFile1Columns([]);
+      loadFileColumns(file1).then(columns => {
+        if (cancelled) return;
+        setFile1Columns(columns);
+        setFile1ColumnsFileId(file1);
+      });
     }
+    return () => { cancelled = true; };
   }, [file1]);
 
   useEffect(() => {
+    let cancelled = false;
+    setFile2Columns([]);
+    setFile2ColumnsFileId('');
+    setMatchOptions(prev => ({ ...prev, idCol2: '', nameCol2: '' }));
     if (file2) {
-      loadFileColumns(file2, setFile2Columns);
-      setMatchOptions(prev => ({ ...prev, idCol2: '', nameCol2: '' }));
-    } else {
-      setFile2Columns([]);
+      loadFileColumns(file2).then(columns => {
+        if (cancelled) return;
+        setFile2Columns(columns);
+        setFile2ColumnsFileId(file2);
+      });
     }
+    return () => { cancelled = true; };
   }, [file2]);
 
   useEffect(() => {
@@ -1640,6 +1669,7 @@ export default function Comparison() {
   }, [file2Columns]);
 
   useEffect(() => {
+    if (file1ColumnsFileId !== file1 || file2ColumnsFileId !== file2) return;
     if (file1Columns.length === 0 || file2Columns.length === 0) return;
     if (mode === 'audit') {
       const pairKey = `${file1}|${file2}|${auditType}`;
@@ -1658,7 +1688,7 @@ export default function Comparison() {
       mappingFilePair.current = pairKey;
       setColumnMappings([createEmptyMapping()]);
     }
-  }, [file1, file2, file1Columns, file2Columns, auditType, mode, mergedCatalog]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [file1, file2, file1Columns, file2Columns, file1ColumnsFileId, file2ColumnsFileId, auditType, mode, mergedCatalog]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     if (mode !== 'audit' || file1Columns.length === 0 || file2Columns.length === 0) return;
@@ -1735,12 +1765,13 @@ export default function Comparison() {
     }
   }
 
-  async function loadFileColumns(fileId, setColumns) {
+  async function loadFileColumns(fileId) {
     try {
       const data = await getFileColumns(fileId);
-      setColumns(data.columns || []);
+      return data.columns || [];
     } catch {
       toast.error('Failed to load columns');
+      return [];
     }
   }
 
@@ -1792,6 +1823,10 @@ export default function Comparison() {
   }
 
   async function handleRun() {
+    if (file1ColumnsFileId !== file1 || file2ColumnsFileId !== file2) {
+      toast.error('Wait for the selected files to finish loading');
+      return;
+    }
     if (!file1 || !file2 || !matchOptions.idCol1 || !matchOptions.idCol2) {
       toast.error('Select both files and employee ID columns');
       return;
@@ -2039,10 +2074,17 @@ export default function Comparison() {
     setExportingInvestigatedDifferences(true);
     try {
       const data = await exportInvestigatedDifferences(runId, ids);
-      const file = data.files?.investigated_differences;
-      if (file?.file_id) {
-        window.open(downloadCsv(file.file_id, 'investigated_differences.csv'), '_blank');
-        toast.success(`Generated ${data.differences || 0} investigated difference record(s)`);
+      const files = Object.values(data.files || {}).filter(file => file?.file_id);
+      if (files.length > 0) {
+        files.forEach(file => {
+          const link = document.createElement('a');
+          link.href = downloadCsv(file.file_id, file.filename);
+          link.download = file.filename || '';
+          document.body.appendChild(link);
+          link.click();
+          link.remove();
+        });
+        toast.success(`Generated ${files.length} investigation CSVs with ${data.differences || 0} difference record(s)`);
       } else {
         toast.info('No investigated differences found to export');
       }
@@ -2218,7 +2260,8 @@ export default function Comparison() {
 
   const approvedIssueCount = reconciliationRun?.status_counts?.approved || 0;
   const roleDifferenceCount = reconciliationRun?.type_counts?.rank_change || 0;
-  const canRun = file1 && file2 && matchOptions.idCol1 && matchOptions.idCol2 && activeMappings.length > 0;
+  const columnsReady = file1ColumnsFileId === file1 && file2ColumnsFileId === file2;
+  const canRun = file1 && file2 && columnsReady && matchOptions.idCol1 && matchOptions.idCol2 && activeMappings.length > 0;
 
   return (
     <div className="space-y-5">

@@ -7,6 +7,7 @@ from typing import Dict, List, Optional, Tuple, Any
 import pandas as pd
 import numpy as np
 from app.services.cleaning_service import DataCleaningService
+from app.services.column_definition_service import get_catalog
 
 
 class ComparisonService:
@@ -346,11 +347,26 @@ class ComparisonService:
         return None
 
     @staticmethod
-    def _find_basic_salary_column(columns: Any) -> Optional[str]:
+    def _basic_salary_aliases() -> set:
+        """Normalized aliases for basic/monthly salary columns, sourced from column_definitions.json
+        so shorthand headers (e.g. "MTHLY SALARY") are recognized without hardcoding every variant."""
         aliases = {'basicsalary', 'basicpay', 'monthlysalary', 'monthlybasic', 'basic'}
+        for entry in get_catalog():
+            if str(entry.get('label', '')).strip().lower() not in ('basic salary', 'mthly salary'):
+                continue
+            for alias in entry.get('aliases', []) or []:
+                normalized = ''.join(ch for ch in str(alias).lower() if ch.isalnum())
+                if normalized:
+                    aliases.add(normalized)
+        return aliases
+
+    @classmethod
+    def _find_basic_salary_column(cls, columns: Any) -> Optional[str]:
+        aliases = cls._basic_salary_aliases()
+        prefixes = tuple(a for a in aliases if a.startswith(('basic', 'monthly', 'mthly')))
         for column in columns:
             normalized = ''.join(ch for ch in str(column).lower() if ch.isalnum())
-            if normalized in aliases or normalized.startswith(('basicsalary', 'basicpay', 'monthlysalary', 'monthlybasic')):
+            if normalized in aliases or normalized.startswith(prefixes):
                 return column
         return None
 
@@ -470,6 +486,12 @@ class ComparisonService:
             if context_col and context_col not in payload_cols:
                 payload_cols.append(context_col)
 
+        # Grade/Notch drive an employee's basic salary — report them as their own flagged
+        # difference instead of repeating them as a footnote under every other mismatch.
+        mapped_pairs = {(m['file1'], m['file2']) for m in column_mappings}
+        grade_covered = bool(grade_col1) and bool(grade_col2) and (grade_col1, grade_col2) in mapped_pairs
+        notch_covered = bool(notch_col1) and bool(notch_col2) and (notch_col1, notch_col2) in mapped_pairs
+
         merged = pd.merge(
             df1_work[df1_work[merge_col] != ''][payload_cols1],
             df2_work[df2_work[merge_col] != ''][payload_cols2],
@@ -526,18 +548,47 @@ class ComparisonService:
                         issue['file1_name'] = row[merged_col_name(name_col1, 'file1')]
                     if name_col2 and merged_col_name(name_col2, 'file2') in merged.columns:
                         issue['file2_name'] = row[merged_col_name(name_col2, 'file2')]
-                    for context_name, context_col1, context_col2 in (
-                        ('grade', grade_col1, grade_col2),
-                        ('notch', notch_col1, notch_col2),
-                    ):
-                        if context_col1 and merged_col_name(context_col1, 'file1') in merged.columns:
-                            issue[f'file1_{context_name}'] = row[merged_col_name(context_col1, 'file1')]
-                        if context_col2 and merged_col_name(context_col2, 'file2') in merged.columns:
-                            issue[f'file2_{context_name}'] = row[merged_col_name(context_col2, 'file2')]
                     mismatch_rows.append({
                         key: ComparisonService._json_safe_scalar(value)
                         for key, value in issue.items()
                     })
+
+            for context_name, context_col1, context_col2, covered in (
+                ('Grade', grade_col1, grade_col2, grade_covered),
+                ('Notch', notch_col1, notch_col2, notch_covered),
+            ):
+                if covered or not context_col1 or not context_col2:
+                    continue
+                source_col = merged_col_name(context_col1, 'file1')
+                target_col = merged_col_name(context_col2, 'file2')
+                if source_col not in merged.columns or target_col not in merged.columns:
+                    continue
+                value1 = row[source_col]
+                value2 = row[target_col]
+                if not ComparisonService._values_differ(value1, value2, 'text', tolerance):
+                    continue
+                employee_issue_count += 1
+                issue = {
+                    'issue_type': 'field_mismatch',
+                    'employee_id': row[merge_col],
+                    'file1_id': row[merged_col_name(id_col1, 'file1')],
+                    'file2_id': row[merged_col_name(id_col2, 'file2')],
+                    'field': context_name,
+                    'file1_column': context_col1,
+                    'file2_column': context_col2,
+                    'file1_value': value1,
+                    'file2_value': value2,
+                    'comparison_type': 'text',
+                    'category': 'grade_notch',
+                }
+                if name_col1 and merged_col_name(name_col1, 'file1') in merged.columns:
+                    issue['file1_name'] = row[merged_col_name(name_col1, 'file1')]
+                if name_col2 and merged_col_name(name_col2, 'file2') in merged.columns:
+                    issue['file2_name'] = row[merged_col_name(name_col2, 'file2')]
+                mismatch_rows.append({
+                    key: ComparisonService._json_safe_scalar(value)
+                    for key, value in issue.items()
+                })
 
             if employee_issue_count == 0:
                 matched_without_differences += 1

@@ -4,6 +4,7 @@ Persistent payroll reconciliation runs, issue review, audit, and HR exports.
 from __future__ import annotations
 
 import math
+import re
 import uuid
 from datetime import datetime
 from typing import Any, Dict, List, Optional
@@ -666,79 +667,238 @@ class ReconciliationService:
 
         file1_label = run.get("file1_label") or "File 1"
         file2_label = run.get("file2_label") or "File 2"
-        grouped: Dict[str, Dict[str, Any]] = {}
-        field_headers: List[tuple] = []
+        source_info = FileService.get_file_info(run.get("source_file1_id")) or {}
+        payroll_info = FileService.get_file_info(run.get("source_file2_id")) or {}
+        source_filename = source_info.get("filename") or file1_label
+        payroll_filename = payroll_info.get("filename") or file2_label
 
+        def is_blank(value: Any) -> bool:
+            if value is None:
+                return True
+            try:
+                if pd.isna(value):
+                    return True
+            except (TypeError, ValueError):
+                pass
+            return str(value).strip() == ""
+
+        def number_value(value: Any) -> Optional[float]:
+            if is_blank(value) or isinstance(value, bool):
+                return None
+            text = str(value).strip().replace(",", "")
+            if text.startswith("(") and text.endswith(")"):
+                text = f"-{text[1:-1]}"
+            text = re.sub(r"^[^0-9+-.]+|[^0-9.]+$", "", text)
+            try:
+                return float(text)
+            except (TypeError, ValueError):
+                return None
+
+        def difference_type(issue: Dict[str, Any], source_value: Any, payroll_value: Any) -> str:
+            issue_type = str(issue.get("issue_type") or "").lower()
+            field = str(issue.get("field") or "").lower()
+            if issue_type == "potential_new_hire" or (is_blank(source_value) and not is_blank(payroll_value)):
+                return "missing_in_source"
+            if issue_type == "potential_resignation" or (not is_blank(source_value) and is_blank(payroll_value)):
+                return "missing_in_payroll"
+            if "name" in field:
+                return "name_mismatch"
+            if any(token in field for token in ("account", "bank", "iban")):
+                return "account_mismatch"
+            if any(token in field for token in ("take home", "takehome", "net pay", "net salary")):
+                return "take_home_difference"
+            if "allowance" in field or issue_type == "allowance_change":
+                return "allowance_difference"
+            if any(token in field for token in ("deduction", "tax", "levy")) or "deduction" in issue_type:
+                return "deduction_difference"
+            if issue.get("difference") is not None or (
+                number_value(source_value) is not None and number_value(payroll_value) is not None
+            ):
+                return "amount_difference"
+            return "field_mismatch"
+
+        detail_rows: List[Dict[str, Any]] = []
         for issue in issues:
-            candidate_id = str(issue.get("employee_id") or "").strip()
-            candidate_key = candidate_id.lower()
             source = issue.get("source") or {}
-            field = issue.get("field") or source.get("file1_column") or source.get("file2_column") or "Difference"
-            field_key = str(field)
+            source_value = source.get("file1_value", issue.get("old_value"))
+            payroll_value = source.get("file2_value", issue.get("new_value"))
+            numeric_difference = issue.get("difference")
+            if numeric_difference is None:
+                source_number = number_value(source_value)
+                payroll_number = number_value(payroll_value)
+                if source_number is not None and payroll_number is not None:
+                    numeric_difference = payroll_number - source_number
+            classified_type = difference_type(issue, source_value, payroll_value)
+            financial_impact = numeric_difference if classified_type in {
+                "amount_difference", "allowance_difference", "deduction_difference", "take_home_difference"
+            } else None
+            detail_rows.append({
+                "employee_id": issue.get("employee_id"),
+                "employee_name": issue.get("employee_name") or source.get("file2_name") or source.get("file1_name"),
+                "difference_type": classified_type,
+                "field_name": issue.get("field") or source.get("file1_column") or source.get("file2_column") or "Employee Status",
+                "source_value": source_value,
+                "payroll_value": payroll_value,
+                "numeric_difference": numeric_difference,
+                "source_column": source.get("file1_column"),
+                "payroll_column": source.get("file2_column"),
+                "source_file": source_filename,
+                "payroll_file": payroll_filename,
+                "financial_impact": financial_impact,
+                "status": issue.get("status"),
+                "investigation_note": issue.get("explanation"),
+            })
 
-            if candidate_key not in grouped:
-                grouped[candidate_key] = {
-                    "Candidate Name": issue.get("employee_name") or source.get("file2_name") or source.get("file1_name"),
-                    "Candidate ID": issue.get("employee_id"),
-                    "Difference Count": 0,
-                    "Issue Types": [],
-                    "Statuses": [],
-                    "_differences": {},
-                }
-            candidate = grouped[candidate_key]
-            if field_key in candidate["_differences"]:
-                duplicate_number = 2
-                while f"{field_key} ({duplicate_number})" in candidate["_differences"]:
-                    duplicate_number += 1
-                field_key = f"{field_key} ({duplicate_number})"
-            if field_key not in {key for key, _ in field_headers}:
-                field_headers.append((field_key, field))
-            candidate["Difference Count"] += 1
-            if issue.get("issue_type") and issue.get("issue_type") not in candidate["Issue Types"]:
-                candidate["Issue Types"].append(issue["issue_type"])
-            if issue.get("status") and issue.get("status") not in candidate["Statuses"]:
-                candidate["Statuses"].append(issue["status"])
-            candidate["_differences"][field_key] = {
-                f"{file1_label} Column": source.get("file1_column"),
-                f"{file1_label} Value": source.get("file1_value", issue.get("old_value")),
-                f"{file2_label} Column": source.get("file2_column"),
-                f"{file2_label} Value": source.get("file2_value", issue.get("new_value")),
-                "Numeric Difference": issue.get("difference"),
+        summary_rows: List[Dict[str, Any]] = []
+        for target in sorted(targets):
+            employee_details = [
+                row for row in detail_rows
+                if str(row.get("employee_id") or "").strip().lower() == target
+            ]
+            if not employee_details:
+                continue
+            statuses = sorted({str(row["status"]) for row in employee_details if row.get("status")})
+            summary_rows.append({
+                "employee_id": employee_details[0].get("employee_id"),
+                "employee_name": employee_details[0].get("employee_name"),
+                "difference_count": len(employee_details),
+                "total_financial_difference": sum(
+                    float(row["financial_impact"])
+                    for row in employee_details
+                    if row.get("financial_impact") is not None
+                ),
+                "allowance_differences": sum(row["difference_type"] == "allowance_difference" for row in employee_details),
+                "deduction_differences": sum(row["difference_type"] == "deduction_difference" for row in employee_details),
+                "field_mismatches": sum(row["difference_type"] in {"field_mismatch", "name_mismatch", "account_mismatch"} for row in employee_details),
+                "take_home_difference": sum(
+                    float(row["numeric_difference"])
+                    for row in employee_details
+                    if row["difference_type"] == "take_home_difference" and row.get("numeric_difference") is not None
+                ),
+                "status": statuses[0] if len(statuses) == 1 else ", ".join(statuses),
+            })
+
+        comparison_rows: List[Dict[str, Any]] = []
+        for target in sorted(targets):
+            bundle = cls.get_employee_bundle(run_id, target)
+            source_row = bundle.get("file1_rows", [{}])[0] if bundle.get("file1_rows") else {}
+            payroll_row = bundle.get("file2_rows", [{}])[0] if bundle.get("file2_rows") else {}
+            source_id_column = cls._find_id_column(pd.DataFrame([source_row])) if source_row else None
+            payroll_id_column = cls._find_id_column(pd.DataFrame([payroll_row])) if payroll_row else None
+
+            def name_column(row: Dict[str, Any]) -> Optional[str]:
+                return next((key for key in row if "name" in str(key).lower()), None)
+
+            excluded_source = {column for column in (source_id_column, name_column(source_row)) if column}
+            excluded_payroll = {column for column in (payroll_id_column, name_column(payroll_row)) if column}
+            used_source: set = set()
+            used_payroll: set = set()
+            field_pairs: List[tuple] = []
+
+            for issue in bundle.get("issues", []):
+                issue_source = issue.get("source") or {}
+                source_column = issue_source.get("file1_column")
+                payroll_column = issue_source.get("file2_column")
+                if not source_column and not payroll_column:
+                    continue
+                pair = (issue.get("field") or source_column or payroll_column, source_column, payroll_column)
+                if pair not in field_pairs:
+                    field_pairs.append(pair)
+                    if source_column:
+                        used_source.add(source_column)
+                    if payroll_column:
+                        used_payroll.add(payroll_column)
+
+            normalized_payroll = {
+                re.sub(r"[^a-z0-9]", "", str(column).lower()): column
+                for column in payroll_row
+                if column not in excluded_payroll and column not in used_payroll
             }
+            for source_column in source_row:
+                if source_column in excluded_source or source_column in used_source:
+                    continue
+                normalized = re.sub(r"[^a-z0-9]", "", str(source_column).lower())
+                payroll_column = normalized_payroll.get(normalized)
+                field_pairs.append((source_column, source_column, payroll_column))
+                used_source.add(source_column)
+                if payroll_column:
+                    used_payroll.add(payroll_column)
+            for payroll_column in payroll_row:
+                if payroll_column not in excluded_payroll and payroll_column not in used_payroll:
+                    field_pairs.append((payroll_column, None, payroll_column))
 
-        rows = []
-        for candidate in grouped.values():
-            row = {
-                "Candidate Name": candidate["Candidate Name"],
-                "Candidate ID": candidate["Candidate ID"],
-                "Difference Count": candidate["Difference Count"],
-                "Issue Types": ", ".join(candidate["Issue Types"]),
-                "Statuses": ", ".join(candidate["Statuses"]),
-            }
-            for field_key, _ in field_headers:
-                difference = candidate["_differences"].get(field_key, {})
-                for suffix in (
-                    f"{file1_label} Column",
-                    f"{file1_label} Value",
-                    f"{file2_label} Column",
-                    f"{file2_label} Value",
-                    "Numeric Difference",
-                ):
-                    row[f"{field_key} - {suffix}"] = difference.get(suffix)
-            rows.append(row)
+            for field_name, source_column, payroll_column in field_pairs:
+                source_value = source_row.get(source_column) if source_column else None
+                payroll_value = payroll_row.get(payroll_column) if payroll_column else None
+                source_number = number_value(source_value)
+                payroll_number = number_value(payroll_value)
+                numeric_difference = (
+                    payroll_number - source_number
+                    if source_number is not None and payroll_number is not None
+                    else None
+                )
+                values_match = (
+                    abs(numeric_difference) < 0.0000001
+                    if numeric_difference is not None
+                    else str(source_value or "").strip().casefold() == str(payroll_value or "").strip().casefold()
+                )
+                comparison_rows.append({
+                    "employee_id": bundle.get("employee_id"),
+                    "employee_name": bundle.get("employee_name"),
+                    "field_name": field_name,
+                    "source_value": source_value,
+                    "payroll_value": payroll_value,
+                    "difference": numeric_difference,
+                    "match": "Yes" if values_match else "No",
+                })
 
+        period_candidates = [payroll_filename, file2_label, source_filename, file1_label]
+        month_names = {
+            "jan": 1, "january": 1, "feb": 2, "february": 2, "mar": 3, "march": 3,
+            "apr": 4, "april": 4, "may": 5, "jun": 6, "june": 6, "jul": 7, "july": 7,
+            "aug": 8, "august": 8, "sep": 9, "sept": 9, "september": 9,
+            "oct": 10, "october": 10, "nov": 11, "november": 11, "dec": 12, "december": 12,
+        }
+        period = None
+        for candidate in period_candidates:
+            text = str(candidate or "").lower()
+            numeric_match = re.search(r"(20\d{2})[-_. ](0?[1-9]|1[0-2])", text)
+            if numeric_match:
+                period = f"{numeric_match.group(1)}-{int(numeric_match.group(2)):02d}"
+                break
+            month_match = re.search(
+                r"(?<![a-z])(" + "|".join(month_names) + r")(?![a-z])[-_ ]*(20\d{2})"
+                r"|(20\d{2})[-_ ]*(?<![a-z])(" + "|".join(month_names) + r")(?![a-z])",
+                text,
+            )
+            if month_match:
+                month_name = month_match.group(1) or month_match.group(4)
+                year = month_match.group(2) or month_match.group(3)
+                period = f"{year}-{month_names[month_name]:02d}"
+                break
+        if not period:
+            period = str(run.get("created_at") or cls._now())[:7]
+
+        exports = {
+            "payroll_difference_summary": summary_rows,
+            "payroll_difference_details": detail_rows,
+            "payroll_employee_comparison": comparison_rows,
+        }
         files: Dict[str, Dict[str, Any]] = {}
-        if rows:
-            df = pd.DataFrame(rows)
-            file_id = FileService.create_new_file(df, f"{run_id}_investigated_differences.csv")
-            files["investigated_differences"] = {"file_id": file_id, "records": len(df)}
+        for export_name, rows in exports.items():
+            if not rows:
+                continue
+            dataframe = pd.DataFrame(rows)
+            filename = f"{export_name}_{period}.csv"
+            file_id = FileService.create_new_file(dataframe, filename)
+            files[export_name] = {"file_id": file_id, "records": len(dataframe), "filename": filename}
 
         cls._record_audit(
             run_id,
             None,
             "investigated_differences_exported",
             "system",
-            f"Generated investigated differences export for {len(targets)} candidate(s)",
+            f"Generated {len(files)} payroll investigation exports for {len(targets)} employee(s)",
             None,
             None,
         )
