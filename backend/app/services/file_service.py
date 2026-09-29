@@ -4,6 +4,7 @@ File handling service - manages file uploads, storage, and retrieval
 import os
 import uuid
 import json
+import shutil
 from pathlib import Path
 from datetime import datetime
 from typing import Dict, List, Optional, Tuple
@@ -112,9 +113,14 @@ class FileService:
         else:
             safe_df = df.applymap(cls._json_safe_scalar)
         return safe_df.astype(object).where(pd.notna(safe_df), None)
+
+    @staticmethod
+    def _drop_unnamed_columns(df: pd.DataFrame) -> pd.DataFrame:
+        named_columns = ~df.columns.astype(str).str.match(r'^Unnamed:\s*\d+(?:\.\d+)?$', case=False)
+        return df.loc[:, named_columns]
     
     @classmethod
-    def read_file(cls, filepath: Path, filename: str) -> Tuple[pd.DataFrame, str]:
+    def read_file(cls, filepath: Path, filename: str, sheet_name=0) -> Tuple[pd.DataFrame, str]:
         """
         Read a file (CSV or Excel) and return a DataFrame
         Tries multiple encodings for CSV files
@@ -126,14 +132,14 @@ class FileService:
             for encoding in CSV_ENCODINGS:
                 try:
                     df = pd.read_csv(filepath, encoding=encoding)
-                    return df, encoding
+                    return cls._drop_unnamed_columns(df), encoding
                 except (UnicodeDecodeError, pd.errors.ParserError):
                     continue
             raise ValueError(f"Could not read CSV file with any of the supported encodings")
         
         elif ext == '.xlsx':
-            df = pd.read_excel(filepath, engine='openpyxl')
-            return df, 'xlsx'
+            df = pd.read_excel(filepath, engine='openpyxl', sheet_name=sheet_name)
+            return cls._drop_unnamed_columns(df), 'xlsx'
         
         elif ext == '.xls':
             # Some .xls files are actually HTML exports (e.g. from web apps).
@@ -141,12 +147,12 @@ class FileService:
             try:
                 dfs = pd.read_html(str(filepath))
                 if dfs:
-                    return dfs[0], 'html'
+                    return cls._drop_unnamed_columns(dfs[0]), 'html'
             except Exception:
                 pass
             # Genuine Excel 97-2003 binary format – requires xlrd 2.x
-            df = pd.read_excel(filepath, engine='xlrd')
-            return df, 'xls'
+            df = pd.read_excel(filepath, engine='xlrd', sheet_name=sheet_name)
+            return cls._drop_unnamed_columns(df), 'xls'
         
         else:
             raise ValueError(f"Unsupported file extension: {ext}")
@@ -169,7 +175,8 @@ class FileService:
             f.write(file_content)
         
         # Read the file into a DataFrame
-        df, encoding = cls.read_file(filepath, filename)
+        df, encoding = cls.read_file(filepath, filename, sheet_name=0)
+        sheet_names = cls.get_sheet_names_from_path(filepath, ext)
         
         # Store metadata
         cls._files[file_id] = {
@@ -183,6 +190,9 @@ class FileService:
             'row_count': len(df),
             'uploaded_at': datetime.now().isoformat()
         }
+        if sheet_names:
+            cls._files[file_id]['sheet_names'] = sheet_names
+            cls._files[file_id]['selected_sheet'] = sheet_names[0]
         
         # Store DataFrame
         cls._dataframes[file_id] = df
@@ -215,7 +225,6 @@ class FileService:
             if not filepath.exists():
                 continue
             try:
-                df, encoding = cls.read_file(filepath, filepath.name)
                 metadata = cls._files.get(file_id, {
                     'id': file_id,
                     'filename': filepath.name,
@@ -224,6 +233,8 @@ class FileService:
                     'size': filepath.stat().st_size,
                     'uploaded_at': datetime.now().isoformat(),
                 })
+                selected_sheet = metadata.get('selected_sheet', 0)
+                df, encoding = cls.read_file(filepath, filepath.name, sheet_name=selected_sheet)
                 metadata.update({
                     'filepath': str(filepath),
                     'file_type': ext,
@@ -232,11 +243,43 @@ class FileService:
                     'columns': df.columns.tolist(),
                     'row_count': len(df),
                 })
+                sheet_names = cls.get_sheet_names_from_path(filepath, ext)
+                if sheet_names:
+                    metadata['sheet_names'] = sheet_names
+                    metadata['selected_sheet'] = selected_sheet if selected_sheet in sheet_names else sheet_names[0]
+                    if metadata['selected_sheet'] != selected_sheet:
+                        df, encoding = cls.read_file(filepath, filepath.name, sheet_name=metadata['selected_sheet'])
+                        metadata.update({
+                            'encoding': encoding,
+                            'columns': df.columns.tolist(),
+                            'row_count': len(df),
+                        })
                 cls._files[file_id] = metadata
                 cls._dataframes[file_id] = df
                 cls._persist_catalog()
                 return df
             except Exception:
+                pass
+
+        generated_path = EXPORT_DIR / f"{file_id}.csv"
+        if generated_path.exists():
+            try:
+                df = pd.read_csv(generated_path)
+                cls._files[file_id] = {
+                    'id': file_id,
+                    'filename': generated_path.name,
+                    'filepath': str(generated_path),
+                    'file_type': 'generated',
+                    'is_generated': True,
+                    'encoding': 'utf-8',
+                    'size': generated_path.stat().st_size,
+                    'columns': df.columns.tolist(),
+                    'row_count': len(df),
+                    'uploaded_at': datetime.fromtimestamp(generated_path.stat().st_mtime).isoformat(),
+                }
+                cls._dataframes[file_id] = df
+                return df
+            except (OSError, pd.errors.ParserError, UnicodeDecodeError):
                 pass
         return None
     
@@ -250,6 +293,10 @@ class FileService:
             temporary_path = filepath.with_name(f"{filepath.stem}.tmp{filepath.suffix}")
             if filepath.suffix.lower() == '.csv':
                 df.to_csv(temporary_path, index=False)
+            elif filepath.suffix.lower() == '.xlsx' and cls._files[file_id].get('selected_sheet'):
+                shutil.copy2(filepath, temporary_path)
+                with pd.ExcelWriter(temporary_path, engine='openpyxl', mode='a', if_sheet_exists='replace') as writer:
+                    df.to_excel(writer, index=False, sheet_name=cls._files[file_id]['selected_sheet'])
             elif filepath.suffix.lower() in ('.xlsx', '.xls'):
                 df.to_excel(temporary_path, index=False, engine='openpyxl')
             else:
@@ -260,6 +307,52 @@ class FileService:
         cls._files[file_id]['row_count'] = len(df)
         if filepath.exists():
             cls._files[file_id]['size'] = filepath.stat().st_size
+        cls._persist_catalog()
+        return True
+
+    @staticmethod
+    def get_sheet_names_from_path(filepath: Path, extension: str) -> List[str]:
+        if extension not in ('.xlsx', '.xls'):
+            return []
+        try:
+            with pd.ExcelFile(filepath) as excel_file:
+                return excel_file.sheet_names
+        except Exception:
+            return []
+
+    @classmethod
+    def get_sheet_names(cls, file_id: str) -> Optional[List[str]]:
+        metadata = cls.get_file_info(file_id)
+        if not metadata:
+            return None
+        sheet_names = metadata.get('sheet_names')
+        if sheet_names:
+            return sheet_names
+        filepath = Path(metadata.get('filepath') or '')
+        sheet_names = cls.get_sheet_names_from_path(filepath, metadata.get('file_type', ''))
+        if sheet_names:
+            metadata['sheet_names'] = sheet_names
+            metadata['selected_sheet'] = metadata.get('selected_sheet', sheet_names[0])
+            cls._persist_catalog()
+        return sheet_names
+
+    @classmethod
+    def select_sheet(cls, file_id: str, sheet_name: str) -> bool:
+        metadata = cls.get_file_info(file_id)
+        if not metadata:
+            return False
+        sheet_names = cls.get_sheet_names(file_id) or []
+        if sheet_name not in sheet_names:
+            raise ValueError(f"Sheet '{sheet_name}' not found")
+        filepath = Path(metadata.get('filepath') or '')
+        df, encoding = cls.read_file(filepath, metadata.get('filename', filepath.name), sheet_name=sheet_name)
+        cls._dataframes[file_id] = df
+        metadata.update({
+            'selected_sheet': sheet_name,
+            'encoding': encoding,
+            'columns': df.columns.tolist(),
+            'row_count': len(df),
+        })
         cls._persist_catalog()
         return True
     
@@ -355,15 +448,17 @@ class FileService:
     def create_new_file(cls, df: pd.DataFrame, filename: str) -> str:
         """Create a new file entry from a DataFrame"""
         file_id = str(uuid.uuid4())
+        filepath = EXPORT_DIR / f"{file_id}.csv"
+        df.to_csv(filepath, index=False)
         
         cls._files[file_id] = {
             'id': file_id,
             'filename': filename,
-            'filepath': None,
+            'filepath': str(filepath),
             'file_type': 'generated',
             'is_generated': True,
             'encoding': 'utf-8',
-            'size': 0,
+            'size': filepath.stat().st_size,
             'columns': df.columns.tolist(),
             'row_count': len(df),
             'uploaded_at': datetime.now().isoformat()

@@ -1,11 +1,15 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import toast from 'react-hot-toast';
+import Papa from 'papaparse';
 import DataTable from '../components/DataTable';
 import FormField, { FieldTooltip } from '../components/FormField';
+import { findBestColumn, scoreColumnMatch } from '../utils/columnMatching';
 import {
   listFiles,
   getFileColumns,
+  selectFileSheet,
   compareEmployeeData,
+  dropBlankBasicSalaryRows,
   getReconciliationRun,
   listReconciliationRuns,
   applyReconciliationAction,
@@ -25,17 +29,17 @@ const PAYROLL_FIELD_CATALOG = [
   { label: 'Name',             aliases: ['name', 'employee name', 'fullname', 'full name'],                                    type: 'text',     category: 'identity'   },
   { label: 'Branch',           aliases: ['branch', 'location', 'office'],                                                      type: 'text',     category: 'identity'   },
   { label: 'Annual Salary',    aliases: ['annual salary', 'annualsalary'],                                                     type: 'currency', category: 'earnings'   },
-  { label: 'Basic Salary',     aliases: ['basic salary', 'basicsalary', 'basic', 'monthly salary', 'monthlysalary', 'basic salary (monthly salary)', 'basic salary monthly salary'],                                              type: 'currency', category: 'earnings'   },
-  { label: 'Taxable Allowance',aliases: ['taxable allowance', 'taxableallowance'],                                             type: 'currency', category: 'allowances' },
-  { label: '5.5% SSF',         aliases: ['5.5% ssf', '55 ssf', '55ssf', 'ssf 5.5', 'ssf5.5'],                                type: 'currency', category: 'statutory_deductions' },
-  { label: '4.5% Staff PF',    aliases: ['4.5% staff pf', '45staffpf', 'staff pf', 'staffpf', '45 pf'],                      type: 'currency', category: 'statutory_deductions' },
-  { label: 'Tax Relief',       aliases: ['tax relief', 'taxrelief'],                                                           type: 'currency', category: 'statutory_deductions' },
-  { label: 'Taxable Salary',   aliases: ['taxable salary', 'taxablesalary'],                                                   type: 'currency', category: 'earnings'   },
-  { label: 'Income Tax',       aliases: ['income tax', 'incometax', 'paye'],                                                   type: 'currency', category: 'statutory_deductions' },
+  { label: 'Basic Salary',     aliases: ['basic salary', 'basicsalary', 'basic', 'monthly salary', 'monthlysalary', 'basic salary (monthly salary)', 'basic salary monthly salary'], type: 'currency', category: 'earnings'   },
+  { label: 'Taxable Allowance',aliases: ['taxable allowance', 'taxableallowance', 'taxable allow', 'taxable allow.', 'taxable alloc'], type: 'currency', category: 'allowances' },
+  { label: '5.5% SSF',         aliases: ['5.5% ssf', '55 ssf', '55ssf', 'ssf 5.5', 'ssf5.5', '5.5% ssf employee', 'employee ssf'], type: 'currency', category: 'statutory_deductions' },
+  { label: '4.5% Staff PF',    aliases: ['4.5% staff pf', '45staffpf', 'staff pf', 'staffpf', '45 pf', '7.5%pf staff', 'tier 3 provident fund employee', 'pf staff'], type: 'currency', category: 'statutory_deductions' },
+  { label: 'Tax Relief',       aliases: ['tax relief', 'taxrelief', 'tax/mortgage relief', 'mortgage relief', 'tax relieve'],  type: 'currency', category: 'statutory_deductions' },
+  { label: 'Taxable Salary',   aliases: ['taxable salary', 'taxablesalary', 'taxable pay'],                                   type: 'currency', category: 'earnings'   },
+  { label: 'Income Tax',       aliases: ['income tax', 'incometax', 'paye', 'tax', 'paye tax', 'tax deducted', 'p.a.y.e', 'p.a.y.e.', 'payee'], type: 'currency', category: 'statutory_deductions' },
   { label: 'Other Deductions', aliases: ['other deductions', 'otherdeductions'],                                               type: 'currency', category: 'non_statutory_deductions' },
   { label: 'Deductions',       aliases: ['deductions', 'deduction'],                                                           type: 'currency', category: 'deductions' },
-  { label: 'Total Deductions', aliases: ['total deductions', 'totaldeductions'],                                               type: 'currency', category: 'deductions' },
-  { label: 'Take Home',        aliases: ['take home', 'takehome', 'net pay', 'netpay'],                                        type: 'currency', category: 'earnings'   },
+  { label: 'Total Deductions', aliases: ['total deductions', 'totaldeductions', 'total deduct'],                               type: 'currency', category: 'deductions' },
+  { label: 'Take Home',        aliases: ['take home', 'takehome', 'net pay', 'netpay', 'net sal', 'net salary'],               type: 'currency', category: 'earnings'   },
   { label: '13% SSF',          aliases: ['13% ssf', '13ssf'],                                                                  type: 'currency', category: 'statutory_deductions' },
   { label: '11% PF',           aliases: ['11% pf', '11pf'],                                                                   type: 'currency', category: 'statutory_deductions' },
   { label: '1st Tier (13.5%)', aliases: ['1st tier (13.5%)', '1st tier 13.5', '1sttier135', 'first tier 13.5'],               type: 'currency', category: 'statutory_deductions' },
@@ -52,62 +56,6 @@ const toneClasses = {
   rose: 'bg-rose-50 text-rose-900 border-rose-100',
   slate: 'bg-slate-50 text-slate-900 border-slate-100',
 };
-
-function normalizeHeader(value) {
-  return String(value || '')
-    .toLowerCase()
-    .replace(/[%()]/g, '')
-    .replace(/[^a-z0-9]+/g, ' ')
-    .trim();
-}
-
-function canonicalHeader(value) {
-  return normalizeHeader(value).replace(/\s+/g, '');
-}
-
-function scoreColumnMatch(column, aliases) {
-  const normalizedColumn = normalizeHeader(column);
-  const canonicalColumn = canonicalHeader(column);
-  let score = 0;
-
-  for (const alias of aliases) {
-    const normalizedAlias = normalizeHeader(alias);
-    const canonicalAlias = canonicalHeader(alias);
-
-    if (canonicalColumn === canonicalAlias) {
-      score = Math.max(score, 100);
-    } else if (normalizedColumn === normalizedAlias) {
-      score = Math.max(score, 95);
-    } else if (canonicalColumn.includes(canonicalAlias) || canonicalAlias.includes(canonicalColumn)) {
-      score = Math.max(score, 80);
-    } else {
-      const aliasTokens = normalizedAlias.split(' ').filter(Boolean);
-      const columnTokens = normalizedColumn.split(' ').filter(Boolean);
-      const matchedTokens = aliasTokens.filter((token) => columnTokens.includes(token)).length;
-      if (matchedTokens > 0) {
-        score = Math.max(score, matchedTokens * 20);
-      }
-    }
-  }
-
-  return score;
-}
-
-function findBestColumn(columns, aliases, usedColumns = new Set()) {
-  let bestColumn = '';
-  let bestScore = 0;
-
-  for (const column of columns) {
-    if (usedColumns.has(column)) continue;
-    const score = scoreColumnMatch(column, aliases);
-    if (score > bestScore) {
-      bestScore = score;
-      bestColumn = column;
-    }
-  }
-
-  return bestScore >= 40 ? bestColumn : '';
-}
 
 function inferIdColumn(columns) {
   const preferred = [
@@ -146,15 +94,15 @@ function inferPayrollMappingsForType(columns1, columns2, type = 'full', catalog 
 
   const filtered = catalog.filter(field => {
     if (field.label === 'Name') return false;
-    if (type === 'full')        return field.category !== 'identity';
-    if (type === 'allowances')  return field.category === 'earnings' || field.category === 'allowances';
-    if (type === 'deductions')  return field.category === 'earnings' || ['deductions', 'statutory_deductions', 'non_statutory_deductions'].includes(field.category);
+    if (type === 'full') return field.category !== 'identity';
+    if (type === 'allowances') return field.category === 'earnings' || field.category === 'allowances';
+    if (type === 'deductions') return field.category === 'earnings' || ['deductions', 'statutory_deductions', 'non_statutory_deductions'].includes(field.category);
     return false;
   });
 
   for (const field of filtered) {
-    const col1 = findBestColumn(columns1, field.aliases, used1);
-    const col2 = findBestColumn(columns2, field.aliases, used2);
+    const col1 = findBestColumn(columns1, field.aliases, used1, field.type);
+    const col2 = findBestColumn(columns2, field.aliases, used2, field.type);
     if (col1 && col2) {
       used1.add(col1);
       used2.add(col2);
@@ -172,9 +120,9 @@ function buildMergedCatalog(apiEntries) {
   const extras = (apiEntries || [])
     .filter(e => !baseLabels.has((e.label || '').toLowerCase()))
     .map(e => ({
-      label:    e.label,
-      aliases:  Array.isArray(e.aliases) ? e.aliases : [],
-      type:     e.type || 'currency',
+      label: e.label,
+      aliases: Array.isArray(e.aliases) ? e.aliases : [],
+      type: e.type || 'currency',
       category: e.category || 'allowances',
     }));
   return [...base, ...extras];
@@ -337,33 +285,33 @@ function PresenceList({ title, rows, tone }) {
 
 // ─── Severity config ──────────────────────────────────────────────────────────
 const SEV_CONFIG = {
-  critical: { bar: 'bg-red-500',    badge: 'bg-red-100 text-red-700 border-red-200',    card: 'border-red-200 bg-red-50/40',    icon: '⚠', label: 'Critical' },
-  high:     { bar: 'bg-orange-500', badge: 'bg-orange-100 text-orange-700 border-orange-200', card: 'border-orange-200 bg-orange-50/40', icon: '⚡', label: 'High'     },
-  medium:   { bar: 'bg-yellow-400', badge: 'bg-yellow-100 text-yellow-700 border-yellow-200', card: 'border-yellow-200 bg-yellow-50/40', icon: '◈', label: 'Medium'   },
-  low:      { bar: 'bg-emerald-500',badge: 'bg-emerald-100 text-emerald-700 border-emerald-200', card: 'border-emerald-200 bg-emerald-50/40', icon: '✓', label: 'Low' },
+  critical: { bar: 'bg-red-500', badge: 'bg-red-100 text-red-700 border-red-200', card: 'border-red-200 bg-red-50/40', icon: '⚠', label: 'Critical' },
+  high: { bar: 'bg-orange-500', badge: 'bg-orange-100 text-orange-700 border-orange-200', card: 'border-orange-200 bg-orange-50/40', icon: '⚡', label: 'High' },
+  medium: { bar: 'bg-yellow-400', badge: 'bg-yellow-100 text-yellow-700 border-yellow-200', card: 'border-yellow-200 bg-yellow-50/40', icon: '◈', label: 'Medium' },
+  low: { bar: 'bg-emerald-500', badge: 'bg-emerald-100 text-emerald-700 border-emerald-200', card: 'border-emerald-200 bg-emerald-50/40', icon: '✓', label: 'Low' },
 };
 
 const RISK_BANNER = {
   critical: 'bg-red-600',
-  high:     'bg-orange-500',
-  medium:   'bg-yellow-500',
-  low:      'bg-emerald-500',
-  unknown:  'bg-slate-400',
+  high: 'bg-orange-500',
+  medium: 'bg-yellow-500',
+  low: 'bg-emerald-500',
+  unknown: 'bg-slate-400',
 };
 
 const CATEGORY_LABELS = {
-  net_pay:         'Net Pay',
-  paye:            'PAYE / Tax',
-  ssnit:           'SSNIT',
-  provident_fund:  'Provident Fund',
-  allowances:      'Allowances',
-  presence:        'Presence',
-  duplicates:      'Duplicates',
-  names:           'Names',
+  net_pay: 'Net Pay',
+  paye: 'PAYE / Tax',
+  ssnit: 'SSNIT',
+  provident_fund: 'Provident Fund',
+  allowances: 'Allowances',
+  presence: 'Presence',
+  duplicates: 'Duplicates',
+  names: 'Names',
   account_numbers: 'Account No.',
-  salary:          'Salary',
-  cross_field:     'Cross-Field',
-  data_quality:    'Data Quality',
+  salary: 'Salary',
+  cross_field: 'Cross-Field',
+  data_quality: 'Data Quality',
 };
 
 function SeverityBadge({ severity }) {
@@ -437,10 +385,10 @@ function FindingCard({ finding, index }) {
 function StatutoryGrid({ compliance }) {
   if (!compliance) return null;
   const checks = [
-    { key: 'ssnit_ok',   label: 'SSNIT' },
-    { key: 'paye_ok',    label: 'PAYE'  },
+    { key: 'ssnit_ok', label: 'SSNIT' },
+    { key: 'paye_ok', label: 'PAYE' },
     { key: 'net_pay_ok', label: 'Net Pay' },
-    { key: 'ssf_ok',     label: 'SSF'   },
+    { key: 'ssf_ok', label: 'SSF' },
   ];
   return (
     <div className="space-y-2">
@@ -449,8 +397,8 @@ function StatutoryGrid({ compliance }) {
           const val = compliance[key];
           const status = val === true ? 'ok' : val === false ? 'fail' : 'unknown';
           const cls = {
-            ok:      'bg-emerald-50 border-emerald-200 text-emerald-700',
-            fail:    'bg-red-50 border-red-200 text-red-700',
+            ok: 'bg-emerald-50 border-emerald-200 text-emerald-700',
+            fail: 'bg-red-50 border-red-200 text-red-700',
             unknown: 'bg-slate-50 border-slate-200 text-slate-500',
           }[status];
           const icon = { ok: '✓', fail: '✗', unknown: '—' }[status];
@@ -473,9 +421,9 @@ function AIAuditPanel({ audit }) {
   const [activeTab, setActiveTab] = useState('findings');
   if (!audit) return null;
 
-  const risk        = String(audit.risk_level || 'unknown').toLowerCase();
-  const riskBanner  = RISK_BANNER[risk] || RISK_BANNER.unknown;
-  const findings    = audit.key_findings || [];
+  const risk = String(audit.risk_level || 'unknown').toLowerCase();
+  const riskBanner = RISK_BANNER[risk] || RISK_BANNER.unknown;
+  const findings = audit.key_findings || [];
   const severityOrder = ['critical', 'high', 'medium', 'low'];
   const sorted = [...findings].sort((a, b) => {
     const ai = severityOrder.indexOf(String(a.severity || '').toLowerCase());
@@ -490,9 +438,9 @@ function AIAuditPanel({ audit }) {
   }, {});
 
   const tabs = [
-    { id: 'findings',   label: `Findings (${findings.length})` },
-    { id: 'statutory',  label: 'Statutory' },
-    { id: 'actions',    label: `Actions (${(audit.recommended_actions || []).length})` },
+    { id: 'findings', label: `Findings (${findings.length})` },
+    { id: 'statutory', label: 'Statutory' },
+    { id: 'actions', label: `Actions (${(audit.recommended_actions || []).length})` },
   ];
 
   return (
@@ -509,9 +457,9 @@ function AIAuditPanel({ audit }) {
         </div>
         <div className="flex items-center gap-2 flex-wrap">
           {sevCounts.critical > 0 && <span className="bg-white/20 text-white text-xs font-semibold rounded-full px-2 py-0.5">{sevCounts.critical} critical</span>}
-          {sevCounts.high     > 0 && <span className="bg-white/20 text-white text-xs font-semibold rounded-full px-2 py-0.5">{sevCounts.high} high</span>}
-          {sevCounts.medium   > 0 && <span className="bg-white/20 text-white text-xs font-semibold rounded-full px-2 py-0.5">{sevCounts.medium} medium</span>}
-          {sevCounts.low      > 0 && <span className="bg-white/20 text-white text-xs font-semibold rounded-full px-2 py-0.5">{sevCounts.low} low</span>}
+          {sevCounts.high > 0 && <span className="bg-white/20 text-white text-xs font-semibold rounded-full px-2 py-0.5">{sevCounts.high} high</span>}
+          {sevCounts.medium > 0 && <span className="bg-white/20 text-white text-xs font-semibold rounded-full px-2 py-0.5">{sevCounts.medium} medium</span>}
+          {sevCounts.low > 0 && <span className="bg-white/20 text-white text-xs font-semibold rounded-full px-2 py-0.5">{sevCounts.low} low</span>}
           {audit.chunks_total > 0 && (
             <span className="bg-white/10 text-white/80 text-xs rounded-full px-2 py-0.5">
               {audit.chunks_processed}/{audit.chunks_total} AI chunks
@@ -555,11 +503,10 @@ function AIAuditPanel({ audit }) {
               key={tab.id}
               type="button"
               onClick={() => setActiveTab(tab.id)}
-              className={`px-4 py-1.5 rounded text-xs font-medium transition-all ${
-                activeTab === tab.id
+              className={`px-4 py-1.5 rounded text-xs font-medium transition-all ${activeTab === tab.id
                   ? 'bg-white text-slate-900 shadow-sm'
                   : 'text-slate-500 hover:text-slate-700 hover:bg-white/60'
-              }`}
+                }`}
             >
               {tab.label}
             </button>
@@ -613,77 +560,172 @@ function AIAuditPanel({ audit }) {
 // ─── Column classification override panel ────────────────────────────────────
 
 const CATEGORY_OPTIONS = [
-  { value: 'auto',       label: 'Auto' },
-  { value: 'earnings',   label: 'Earnings' },
+  { value: 'auto', label: 'Auto' },
+  { value: 'earnings', label: 'Earnings' },
   { value: 'allowances', label: 'Allowance' },
   { value: 'statutory_deductions', label: 'Statutory Deduction' },
   { value: 'non_statutory_deductions', label: 'Non-Statutory Deduction' },
   { value: 'deductions', label: 'Deduction (Unclassified)' },
-  { value: 'identity',   label: 'Identity' },
+  { value: 'identity', label: 'Identity' },
 ];
 
 const CAT_PILL = {
-  earnings:   'bg-blue-100 text-blue-700',
+  earnings: 'bg-blue-100 text-blue-700',
   allowances: 'bg-emerald-100 text-emerald-700',
   statutory_deductions: 'bg-rose-100 text-rose-700',
   non_statutory_deductions: 'bg-orange-100 text-orange-700',
   deductions: 'bg-red-100 text-red-700',
-  identity:   'bg-slate-100 text-slate-600',
-  auto:       'bg-slate-100 text-slate-500',
+  identity: 'bg-slate-100 text-slate-600',
+  auto: 'bg-slate-100 text-slate-500',
 };
 
-function ColumnClassificationPanel({ mappings, onChangeCategoryOverride, onChangeThreshold }) {
-  if (!mappings || mappings.length === 0) return null;
-
+function ColumnClassificationPanel({
+  mappings = [],
+  file1Columns = [],
+  file2Columns = [],
+  onChangeCategoryOverride,
+  onChangeThreshold,
+  onChangeFile1Column,
+  onChangeFile2Column,
+  onChangeFieldLabel,
+  onRemoveMapping,
+  onAddMapping,
+  onResetMappings,
+}) {
   return (
-    <div className="space-y-2">
+    <div className="space-y-3">
       <p className="text-xs text-slate-500 leading-relaxed">
-        If the automatic category detection is incorrect for any column, override it here.
-        These classifications help the AI understand your payroll structure.
+        Verify and adjust auto-detected field mappings below. You can change which columns map to each field label, select categories, unassign incorrect matches, or add new field pairs before running your audit.
       </p>
+
       <div className="rounded-xl border border-slate-200 overflow-hidden">
-        <table className="w-full text-sm">
-          <thead>
-            <tr className="bg-slate-50 border-b border-slate-200">
-              <th className="text-left px-4 py-2 text-xs font-semibold text-slate-500 uppercase tracking-wide">Field Label</th>
-              <th className="text-left px-4 py-2 text-xs font-semibold text-slate-500 uppercase tracking-wide hidden sm:table-cell">File 1 Column</th>
-              <th className="text-left px-4 py-2 text-xs font-semibold text-slate-500 uppercase tracking-wide hidden sm:table-cell">File 2 Column</th>
-              <th className="text-left px-4 py-2 text-xs font-semibold text-slate-500 uppercase tracking-wide">Category</th>
-              <th className="text-left px-4 py-2 text-xs font-semibold text-slate-500 uppercase tracking-wide">Threshold</th>
-            </tr>
-          </thead>
-          <tbody>
-            {mappings.map((m, i) => {
-              const current = m.category || 'auto';
-              return (
-                <tr key={i} className="border-b border-slate-100 last:border-0 hover:bg-slate-50/50">
-                  <td className="px-4 py-2.5 font-medium text-slate-800 text-xs">{m.label || m.file1}</td>
-                  <td className="px-4 py-2.5 text-slate-500 text-xs hidden sm:table-cell">{m.file1}</td>
-                  <td className="px-4 py-2.5 text-slate-500 text-xs hidden sm:table-cell">{m.file2}</td>
-                  <td className="px-4 py-2.5">
-                    <select
-                      value={current}
-                      onChange={e => onChangeCategoryOverride(i, e.target.value)}
-                      className={`text-xs font-medium rounded-full px-2 py-0.5 border-0 outline-none cursor-pointer ${CAT_PILL[current] || CAT_PILL.auto} appearance-none pr-5`}
-                      style={{ backgroundImage: 'url("data:image/svg+xml,%3Csvg xmlns=\'http://www.w3.org/2000/svg\' width=\'10\' height=\'6\'%3E%3Cpath fill=\'%23888\' d=\'M0 0l5 6 5-6z\'/%3E%3C/svg%3E")', backgroundRepeat: 'no-repeat', backgroundPosition: 'right 0.35rem center' }}
-                    >
-                      {CATEGORY_OPTIONS.map(opt => (
-                        <option key={opt.value} value={opt.value}>{opt.label}</option>
-                      ))}
-                    </select>
-                  </td>
-                  <td className="px-4 py-2.5">
-                    {['currency', 'number', 'numeric'].includes(m.type) ? (
-                      <input type="number" min="0" step="0.01" value={m.threshold ?? ''}
-                        onChange={e => onChangeThreshold(i, e.target.value)} placeholder="Global"
-                        className="input w-24 text-xs py-1" />
-                    ) : <span className="text-xs text-slate-400">N/A</span>}
+        <div className="overflow-x-auto">
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="bg-slate-50 border-b border-slate-200">
+                <th className="text-left px-3 py-2 text-xs font-semibold text-slate-500 uppercase tracking-wide w-1/4">Field Label</th>
+                <th className="text-left px-3 py-2 text-xs font-semibold text-slate-500 uppercase tracking-wide w-1/4">File 1 Column</th>
+                <th className="text-left px-3 py-2 text-xs font-semibold text-slate-500 uppercase tracking-wide w-1/4">File 2 Column</th>
+                <th className="text-left px-3 py-2 text-xs font-semibold text-slate-500 uppercase tracking-wide">Category</th>
+                <th className="text-left px-3 py-2 text-xs font-semibold text-slate-500 uppercase tracking-wide w-24">Threshold</th>
+                <th className="text-center px-2 py-2 text-xs font-semibold text-slate-500 uppercase tracking-wide w-10"></th>
+              </tr>
+            </thead>
+            <tbody>
+              {mappings.length === 0 ? (
+                <tr>
+                  <td colSpan={6} className="px-4 py-6 text-center text-xs text-slate-400 italic">
+                    No field mappings configured. Click "+ Add Field Mapping" below to manually add a pair.
                   </td>
                 </tr>
-              );
-            })}
-          </tbody>
-        </table>
+              ) : (
+                mappings.map((m, i) => {
+                  const currentCategory = m.category || 'auto';
+                  const f1Options = m.file1 && !file1Columns.includes(m.file1)
+                    ? [m.file1, ...file1Columns]
+                    : file1Columns;
+                  const f2Options = m.file2 && !file2Columns.includes(m.file2)
+                    ? [m.file2, ...file2Columns]
+                    : file2Columns;
+
+                  return (
+                    <tr key={i} className="border-b border-slate-100 last:border-0 hover:bg-slate-50/50 transition-colors">
+                      <td className="px-3 py-2">
+                        <input
+                          type="text"
+                          value={m.label || ''}
+                          onChange={e => onChangeFieldLabel && onChangeFieldLabel(i, e.target.value)}
+                          placeholder="Field Label"
+                          className="input text-xs py-1 w-full font-medium text-slate-800"
+                        />
+                      </td>
+                      <td className="px-3 py-2">
+                        <select
+                          value={m.file1 || ''}
+                          onChange={e => onChangeFile1Column && onChangeFile1Column(i, e.target.value)}
+                          className="input text-xs py-1 w-full font-mono bg-white text-slate-700"
+                        >
+                          <option value="">— Unmatched —</option>
+                          {f1Options.map(col => (
+                            <option key={col} value={col}>{col}</option>
+                          ))}
+                        </select>
+                      </td>
+                      <td className="px-3 py-2">
+                        <select
+                          value={m.file2 || ''}
+                          onChange={e => onChangeFile2Column && onChangeFile2Column(i, e.target.value)}
+                          className="input text-xs py-1 w-full font-mono bg-white text-slate-700"
+                        >
+                          <option value="">— Unmatched —</option>
+                          {f2Options.map(col => (
+                            <option key={col} value={col}>{col}</option>
+                          ))}
+                        </select>
+                      </td>
+                      <td className="px-3 py-2">
+                        <select
+                          value={currentCategory}
+                          onChange={e => onChangeCategoryOverride && onChangeCategoryOverride(i, e.target.value)}
+                          className={`text-xs font-medium rounded-full px-2 py-1 border-0 outline-none cursor-pointer ${CAT_PILL[currentCategory] || CAT_PILL.auto} appearance-none pr-5 w-full`}
+                          style={{ backgroundImage: 'url("data:image/svg+xml,%3Csvg xmlns=\'http://www.w3.org/2000/svg\' width=\'10\' height=\'6\'%3E%3Cpath fill=\'%23888\' d=\'M0 0l5 6 5-6z\'/%3E%3C/svg%3E")', backgroundRepeat: 'no-repeat', backgroundPosition: 'right 0.35rem center' }}
+                        >
+                          {CATEGORY_OPTIONS.map(opt => (
+                            <option key={opt.value} value={opt.value}>{opt.label}</option>
+                          ))}
+                        </select>
+                      </td>
+                      <td className="px-3 py-2">
+                        {['currency', 'number', 'numeric'].includes(m.type || 'currency') ? (
+                          <input
+                            type="number"
+                            min="0"
+                            step="0.01"
+                            value={m.threshold ?? ''}
+                            onChange={e => onChangeThreshold && onChangeThreshold(i, e.target.value)}
+                            placeholder="Global"
+                            className="input w-full text-xs py-1"
+                          />
+                        ) : (
+                          <span className="text-xs text-slate-400">N/A</span>
+                        )}
+                      </td>
+                      <td className="px-2 py-2 text-center">
+                        <button
+                          type="button"
+                          onClick={() => onRemoveMapping && onRemoveMapping(i)}
+                          title="Remove this mapping"
+                          className="h-6 w-6 rounded hover:bg-rose-50 text-slate-400 hover:text-rose-600 text-xs inline-flex items-center justify-center transition-colors"
+                        >
+                          ✕
+                        </button>
+                      </td>
+                    </tr>
+                  );
+                })
+              )}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <div className="flex items-center justify-between gap-2 pt-1 flex-wrap">
+        <button
+          type="button"
+          onClick={onAddMapping}
+          className="btn btn-secondary text-xs py-1 px-3 flex items-center gap-1.5"
+        >
+          <span>+</span> Add Field Mapping
+        </button>
+        {onResetMappings && (
+          <button
+            type="button"
+            onClick={onResetMappings}
+            className="text-xs text-slate-500 hover:text-slate-700 font-medium flex items-center gap-1"
+          >
+            <span>↻</span> Reset to Defaults
+          </button>
+        )}
       </div>
     </div>
   );
@@ -727,9 +769,9 @@ function NameColumnsNotice({ names }) {
 
 // ─── Audit type card selector ─────────────────────────────────────────────────
 const AUDIT_TYPES = [
-  { value: 'full',       label: 'Full Payroll Audit', description: 'All mapped payroll fields — earnings, allowances and deductions.', accent: 'blue'    },
-  { value: 'allowances', label: 'Allowances Audit',   description: 'Earnings and allowance columns only.',                              accent: 'emerald' },
-  { value: 'deductions', label: 'Deductions Audit',   description: 'Deduction and tax columns with earnings as context.',               accent: 'violet'  },
+  { value: 'full', label: 'Full Payroll Audit', description: 'All mapped payroll fields — earnings, allowances and deductions.', accent: 'blue' },
+  { value: 'allowances', label: 'Allowances Audit', description: 'Earnings and allowance columns only.', accent: 'emerald' },
+  { value: 'deductions', label: 'Deductions Audit', description: 'Deduction and tax columns with earnings as context.', accent: 'violet' },
 ];
 
 function AuditTypeSelector({ value, onChange }) {
@@ -738,20 +780,19 @@ function AuditTypeSelector({ value, onChange }) {
       {AUDIT_TYPES.map(opt => {
         const active = value === opt.value;
         const colors = {
-          blue:    { border: 'border-blue-500',    bg: 'bg-blue-50',    title: 'text-blue-700',    dot: 'bg-blue-500'    },
+          blue: { border: 'border-blue-500', bg: 'bg-blue-50', title: 'text-blue-700', dot: 'bg-blue-500' },
           emerald: { border: 'border-emerald-500', bg: 'bg-emerald-50', title: 'text-emerald-700', dot: 'bg-emerald-500' },
-          violet:  { border: 'border-violet-500',  bg: 'bg-violet-50',  title: 'text-violet-700',  dot: 'bg-violet-500'  },
+          violet: { border: 'border-violet-500', bg: 'bg-violet-50', title: 'text-violet-700', dot: 'bg-violet-500' },
         }[opt.accent];
         return (
           <button
             key={opt.value}
             type="button"
             onClick={() => onChange(opt.value)}
-            className={`text-left rounded-xl border-2 p-4 transition-all focus:outline-none ${
-              active
+            className={`text-left rounded-xl border-2 p-4 transition-all focus:outline-none ${active
                 ? `${colors.border} ${colors.bg} shadow-sm`
                 : 'border-slate-200 bg-white hover:border-slate-300 hover:shadow-sm'
-            }`}
+              }`}
           >
             <div className="flex items-center gap-2 mb-1.5">
               <span className={`h-2.5 w-2.5 rounded-full ${active ? colors.dot : 'bg-slate-300'}`} />
@@ -772,9 +813,9 @@ const UNDETECTED_CAT_OPTIONS = [
   { value: 'statutory_deductions', label: 'Statutory Deduction' },
   { value: 'non_statutory_deductions', label: 'Non-Statutory Deduction' },
   { value: 'deductions', label: 'Deduction (Unclassified)' },
-  { value: 'earnings',   label: 'Earning'   },
-  { value: 'identity',   label: 'Identity'  },
-  { value: 'other',      label: 'Other'     },
+  { value: 'earnings', label: 'Earning' },
+  { value: 'identity', label: 'Identity' },
+  { value: 'other', label: 'Other' },
 ];
 
 function UndetectedColumnsPanel({ rows, onChange, onAddToAudit, onSaveToConfig, saving }) {
@@ -829,69 +870,69 @@ function UndetectedColumnsPanel({ rows, onChange, onAddToAudit, onSaveToConfig, 
             want to include in the audit, then add them or save to config for future auto-detection.
           </p>
           <div className="rounded-xl border border-amber-200 overflow-hidden bg-white">
-        <table className="w-full text-sm">
-          <thead>
-            <tr className="bg-amber-50 border-b border-amber-200">
-              <th className="px-3 py-2 w-8">
-                <input
-                  type="checkbox"
-                  title="Select all"
-                  checked={rows.length > 0 && rows.every(r => r.include)}
-                  onChange={e => rows.forEach((_, i) => onChange(i, 'include', e.target.checked))}
-                  className="rounded border-slate-300"
-                />
-              </th>
-              <th className="text-left px-3 py-2 text-xs font-semibold text-amber-700 uppercase tracking-wide">File 1 Column</th>
-              <th className="text-left px-3 py-2 text-xs font-semibold text-amber-700 uppercase tracking-wide hidden sm:table-cell">File 2 Column</th>
-              <th className="text-left px-3 py-2 text-xs font-semibold text-amber-700 uppercase tracking-wide">Label</th>
-              <th className="text-left px-3 py-2 text-xs font-semibold text-amber-700 uppercase tracking-wide">Category</th>
-            </tr>
-          </thead>
-          <tbody>
-            {rows.map((row, i) => (
-              <tr key={i} className={`border-b border-amber-100 last:border-0 ${row.include ? 'bg-amber-50/40' : 'hover:bg-slate-50/40'}`}>
-                <td className="px-3 py-2">
-                  <input
-                    type="checkbox"
-                    checked={row.include}
-                    onChange={e => onChange(i, 'include', e.target.checked)}
-                    className="rounded border-slate-300"
-                  />
-                </td>
-                <td className="px-3 py-2 text-xs text-slate-700 font-medium">{row.col1 || <span className="text-slate-400 italic">—</span>}</td>
-                <td className="px-3 py-2 text-xs text-slate-500 hidden sm:table-cell">
-                  <input
-                    type="text"
-                    value={row.col2}
-                    onChange={e => onChange(i, 'col2', e.target.value)}
-                    placeholder="File 2 column name"
-                    className="input text-xs py-0.5 w-full"
-                  />
-                </td>
-                <td className="px-3 py-2">
-                  <input
-                    type="text"
-                    value={row.label}
-                    onChange={e => onChange(i, 'label', e.target.value)}
-                    className="input text-xs py-0.5 w-full"
-                  />
-                </td>
-                <td className="px-3 py-2">
-                  <select
-                    value={row.category}
-                    onChange={e => onChange(i, 'category', e.target.value)}
-                    className={`text-xs font-medium rounded-full px-2 py-0.5 border-0 outline-none cursor-pointer ${CAT_PILL[row.category] || CAT_PILL.auto} appearance-none pr-5`}
-                    style={{ backgroundImage: 'url("data:image/svg+xml,%3Csvg xmlns=\'http://www.w3.org/2000/svg\' width=\'10\' height=\'6\'%3E%3Cpath fill=\'%23888\' d=\'M0 0l5 6 5-6z\'/%3E%3C/svg%3E")', backgroundRepeat: 'no-repeat', backgroundPosition: 'right 0.35rem center' }}
-                  >
-                    {UNDETECTED_CAT_OPTIONS.map(opt => (
-                      <option key={opt.value} value={opt.value}>{opt.label}</option>
-                    ))}
-                  </select>
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="bg-amber-50 border-b border-amber-200">
+                  <th className="px-3 py-2 w-8">
+                    <input
+                      type="checkbox"
+                      title="Select all"
+                      checked={rows.length > 0 && rows.every(r => r.include)}
+                      onChange={e => rows.forEach((_, i) => onChange(i, 'include', e.target.checked))}
+                      className="rounded border-slate-300"
+                    />
+                  </th>
+                  <th className="text-left px-3 py-2 text-xs font-semibold text-amber-700 uppercase tracking-wide">File 1 Column</th>
+                  <th className="text-left px-3 py-2 text-xs font-semibold text-amber-700 uppercase tracking-wide hidden sm:table-cell">File 2 Column</th>
+                  <th className="text-left px-3 py-2 text-xs font-semibold text-amber-700 uppercase tracking-wide">Label</th>
+                  <th className="text-left px-3 py-2 text-xs font-semibold text-amber-700 uppercase tracking-wide">Category</th>
+                </tr>
+              </thead>
+              <tbody>
+                {rows.map((row, i) => (
+                  <tr key={i} className={`border-b border-amber-100 last:border-0 ${row.include ? 'bg-amber-50/40' : 'hover:bg-slate-50/40'}`}>
+                    <td className="px-3 py-2">
+                      <input
+                        type="checkbox"
+                        checked={row.include}
+                        onChange={e => onChange(i, 'include', e.target.checked)}
+                        className="rounded border-slate-300"
+                      />
+                    </td>
+                    <td className="px-3 py-2 text-xs text-slate-700 font-medium">{row.col1 || <span className="text-slate-400 italic">—</span>}</td>
+                    <td className="px-3 py-2 text-xs text-slate-500 hidden sm:table-cell">
+                      <input
+                        type="text"
+                        value={row.col2}
+                        onChange={e => onChange(i, 'col2', e.target.value)}
+                        placeholder="File 2 column name"
+                        className="input text-xs py-0.5 w-full"
+                      />
+                    </td>
+                    <td className="px-3 py-2">
+                      <input
+                        type="text"
+                        value={row.label}
+                        onChange={e => onChange(i, 'label', e.target.value)}
+                        className="input text-xs py-0.5 w-full"
+                      />
+                    </td>
+                    <td className="px-3 py-2">
+                      <select
+                        value={row.category}
+                        onChange={e => onChange(i, 'category', e.target.value)}
+                        className={`text-xs font-medium rounded-full px-2 py-0.5 border-0 outline-none cursor-pointer ${CAT_PILL[row.category] || CAT_PILL.auto} appearance-none pr-5`}
+                        style={{ backgroundImage: 'url("data:image/svg+xml,%3Csvg xmlns=\'http://www.w3.org/2000/svg\' width=\'10\' height=\'6\'%3E%3Cpath fill=\'%23888\' d=\'M0 0l5 6 5-6z\'/%3E%3C/svg%3E")', backgroundRepeat: 'no-repeat', backgroundPosition: 'right 0.35rem center' }}
+                      >
+                        {UNDETECTED_CAT_OPTIONS.map(opt => (
+                          <option key={opt.value} value={opt.value}>{opt.label}</option>
+                        ))}
+                      </select>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
           </div>
         </>
       )}
@@ -916,10 +957,10 @@ function ColumnDefsManagerModal({ entries, onClose, onSaveEntry, onReplaceAll })
     setSaving(true);
     try {
       const cleaned = localEntries.map(e => ({
-        label:    e.label,
-        aliases:  e._aliasText.split(',').map(a => a.trim()).filter(Boolean),
+        label: e.label,
+        aliases: e._aliasText.split(',').map(a => a.trim()).filter(Boolean),
         category: e.category,
-        type:     e.type || 'currency',
+        type: e.type || 'currency',
       }));
       await onReplaceAll({ version: '1.0', entries: cleaned });
       toast.success('Column definitions saved');
@@ -936,10 +977,10 @@ function ColumnDefsManagerModal({ entries, onClose, onSaveEntry, onReplaceAll })
     setSaving(true);
     try {
       await onSaveEntry({
-        label:    newEntry.label.trim(),
-        aliases:  newEntry.aliases.split(',').map(a => a.trim()).filter(Boolean),
+        label: newEntry.label.trim(),
+        aliases: newEntry.aliases.split(',').map(a => a.trim()).filter(Boolean),
         category: newEntry.category,
-        type:     newEntry.type,
+        type: newEntry.type,
       });
       setLocalEntries(prev => [
         ...prev,
@@ -1080,6 +1121,16 @@ function formatIssueName(value) {
     .replace(/\b\w/g, character => character.toUpperCase());
 }
 
+function getInvestigationColumnName(issue) {
+  const source = issue?.source || {};
+  const file1Column = source.file1_column || '';
+  const file2Column = source.file2_column || '';
+  if (file1Column && file2Column && file1Column !== file2Column) {
+    return `${file1Column} / ${file2Column}`;
+  }
+  return file1Column || file2Column || issue?.field || 'Issue';
+}
+
 function formatFileHeader(value) {
   const filename = String(value || 'File')
     .replace(/\.[^.]+$/, '')
@@ -1106,17 +1157,17 @@ function EmployeeInvestigationModal({
   onExportDifferences,
   exportingDifferences,
 }) {
-  const [selectedDetectedColumn, setSelectedDetectedColumn] = useState('');
+  const [selectedDifferenceName, setSelectedDifferenceName] = useState('');
   const data = bundles?.[activeId];
   const loading = loadingIds?.has(activeId);
   const investigating = investigatingIds?.has(activeId);
   const investigation = data?.investigation;
   const issues = data?.issues || [];
   const multiple = employeeIds.length > 1;
-  const issueName = formatIssueName(issueFields?.length === 1 ? issueFields[0] : 'Selected Issue');
   const file1Header = formatFileHeader(data?.file1_label || 'File 1');
   const file2Header = formatFileHeader(data?.file2_label || 'File 2');
 
+  // One row per flagged difference (never merged/summarized), across every selected employee.
   const investigationRows = useMemo(() => {
     const rows = [];
     for (const employeeId of employeeIds) {
@@ -1124,57 +1175,27 @@ function EmployeeInvestigationModal({
       if (!bundle || bundle.error) continue;
       for (const issue of bundle.issues || []) {
         const source = issue.source || {};
-        const columnKey = `${source.file1_column || issue.field || ''}||${source.file2_column || issue.field || ''}`;
-        rows.push({ employeeId, bundle, issue, source, columnKey });
+        rows.push({ employeeId, bundle, issue, source, differenceName: getInvestigationColumnName(issue) });
       }
     }
     return rows;
   }, [bundles, employeeIds]);
 
-  const detectedColumnOptions = useMemo(() => {
-    const options = new Map();
-    for (const row of investigationRows) {
-      const file1Column = row.source.file1_column || row.issue.field || '';
-      const file2Column = row.source.file2_column || row.issue.field || '';
-      if (file1Column || file2Column) {
-        options.set(row.columnKey, { file1Column, file2Column });
-      }
-    }
-    return Array.from(options.entries()).sort(([, left], [, right]) =>
-      `${left.file1Column} ${left.file2Column}`.localeCompare(`${right.file1Column} ${right.file2Column}`)
-    );
+  const differenceNameOptions = useMemo(() => {
+    const names = new Set(investigationRows.map(row => row.differenceName).filter(Boolean));
+    return Array.from(names).sort((a, b) => a.localeCompare(b));
   }, [investigationRows]);
 
-  const selectedDetectedColumns = detectedColumnOptions.find(([key]) => key === selectedDetectedColumn)?.[1];
-  const detectedName = formatIssueName(selectedDetectedColumns?.file1Column || selectedDetectedColumns?.file2Column || 'Detected Column');
-
   const filteredInvestigationRows = useMemo(() => {
-    const byEmployee = new Map();
-    for (const row of investigationRows) {
-      if (!byEmployee.has(row.employeeId)) {
-        byEmployee.set(row.employeeId, { employeeId: row.employeeId, bundle: row.bundle, rows: [] });
-      }
-      byEmployee.get(row.employeeId).rows.push(row);
-    }
-
-    return Array.from(byEmployee.values()).flatMap(candidate => {
-      const issueRow = candidate.rows.find(row => !issueFields?.length || issueFields.includes(row.issue.field));
-      const detectedRow = candidate.rows.find(row => !selectedDetectedColumn || row.columnKey === selectedDetectedColumn);
-      if (!issueRow || !detectedRow) return [];
-      return [{
-        employeeId: candidate.employeeId,
-        bundle: candidate.bundle,
-        issue: issueRow.issue,
-        detected: detectedRow,
-      }];
-    });
-  }, [investigationRows, issueFields, selectedDetectedColumn]);
+    if (!selectedDifferenceName) return investigationRows;
+    return investigationRows.filter(row => row.differenceName === selectedDifferenceName);
+  }, [investigationRows, selectedDifferenceName]);
 
   useEffect(() => {
-    if (selectedDetectedColumn && !detectedColumnOptions.some(([key]) => key === selectedDetectedColumn)) {
-      setSelectedDetectedColumn('');
+    if (selectedDifferenceName && !differenceNameOptions.includes(selectedDifferenceName)) {
+      setSelectedDifferenceName('');
     }
-  }, [detectedColumnOptions, selectedDetectedColumn]);
+  }, [differenceNameOptions, selectedDifferenceName]);
 
   function displayValue(value) {
     return value === null || value === undefined || value === '' ? '-' : String(value);
@@ -1210,11 +1231,10 @@ function EmployeeInvestigationModal({
                     key={id}
                     type="button"
                     onClick={() => onSelectTab(id)}
-                    className={`mb-1 px-3 py-1.5 rounded-t-lg text-xs font-semibold border-b-2 transition-colors ${
-                      isActive
+                    className={`mb-1 px-3 py-1.5 rounded-t-lg text-xs font-semibold border-b-2 transition-colors ${isActive
                         ? 'border-indigo-500 text-indigo-700 bg-white'
                         : 'border-transparent text-slate-500 hover:text-slate-700'
-                    }`}
+                      }`}
                   >
                     {tabBundle?.employee_name || id}
                     {tabBundle?.investigation && (
@@ -1234,11 +1254,11 @@ function EmployeeInvestigationModal({
             </button>
             <button
               type="button"
-              onClick={() => onExportDifferences(employeeIds)}
+              onClick={() => onExportDifferences(employeeIds, investigationRows.map(row => row.issue.id).filter(Boolean))}
               disabled={exportingDifferences || employeeIds.length === 0}
               className="btn btn-secondary text-xs disabled:opacity-40 whitespace-nowrap"
             >
-              {exportingDifferences ? 'Exporting...' : 'Export Investigation (3 CSVs)'}
+              {exportingDifferences ? 'Preparing...' : 'Preview Detailed CSV'}
             </button>
           </div>
         )}
@@ -1267,14 +1287,13 @@ function EmployeeInvestigationModal({
                       return (
                         <div
                           key={issue.id}
-                          className={`rounded-lg border px-3 py-2 text-xs flex items-center justify-between gap-3 ${
-                            isInvestigating
+                          className={`rounded-lg border px-3 py-2 text-xs flex items-center justify-between gap-3 ${isInvestigating
                               ? 'border-indigo-300 bg-indigo-50 ring-1 ring-indigo-200'
                               : 'border-slate-200 bg-slate-50'
-                          }`}
+                            }`}
                         >
                           <span className={`font-semibold flex items-center gap-1.5 ${isInvestigating ? 'text-indigo-900' : 'text-slate-800'}`}>
-                            {issue.field}
+                            {getInvestigationColumnName(issue)}
                             {isInvestigating && (
                               <span className="text-[9px] font-bold uppercase tracking-wide text-indigo-600 bg-indigo-100 rounded-full px-1.5 py-0.5">
                                 Investigating
@@ -1303,69 +1322,52 @@ function EmployeeInvestigationModal({
                   <div>
                     <p className="text-xs font-semibold text-slate-700 uppercase tracking-wide">Difference explorer</p>
                     <p className="text-xs text-slate-500 mt-0.5">
-                      Showing the selected issue{issueFields?.length === 1 ? `: ${issueFields[0]}` : 's'} from the reconciliation filters. Choose a detected column to compare against it.
+                      Every flagged difference detected across the selected candidates, listed individually under its own difference name — nothing is merged into a summary.
                     </p>
                   </div>
                   <div className="grid grid-cols-1 gap-2">
-                    <select value={selectedDetectedColumn} onChange={e => setSelectedDetectedColumn(e.target.value)} className="input text-xs">
-                      <option value="">All detected columns</option>
-                      {detectedColumnOptions.map(([key, columns]) => (
-                        <option key={key} value={key}>{columns.file1Column} / {columns.file2Column}</option>
+                    <select value={selectedDifferenceName} onChange={e => setSelectedDifferenceName(e.target.value)} className="input text-xs">
+                      <option value="">All flagged differences ({investigationRows.length})</option>
+                      {differenceNameOptions.map(name => (
+                        <option key={name} value={name}>{name}</option>
                       ))}
                     </select>
                   </div>
-                  {selectedDetectedColumn && (
-                    <div className="rounded-lg border border-indigo-100 max-h-80 overflow-auto">
-                      <table className="w-full text-xs min-w-[900px]">
-                        <thead>
-                          <tr className="bg-indigo-50 border-b border-indigo-100 text-left">
-                            <th className="sticky top-0 z-10 bg-indigo-50 px-3 py-2 font-semibold text-indigo-800">Candidate</th>
-                            <th className="sticky top-0 z-10 bg-indigo-50 px-3 py-2 font-semibold text-indigo-800">Issue under review</th>
-                            <th className="sticky top-0 z-10 bg-indigo-50 px-3 py-2 font-semibold text-indigo-800">Detected column</th>
-                            <th className="sticky top-0 z-10 bg-indigo-50 px-3 py-2 font-semibold text-indigo-800">{detectedName} ({file1Header})</th>
-                            <th className="sticky top-0 z-10 bg-indigo-50 px-3 py-2 font-semibold text-indigo-800">{detectedName} ({file2Header})</th>
-                            <th className="sticky top-0 z-10 bg-indigo-50 px-3 py-2 font-semibold text-indigo-800">Detected Difference</th>
-                            <th className="sticky top-0 z-10 bg-indigo-50 px-3 py-2 font-semibold text-indigo-800">{issueName} ({file1Header})</th>
-                            <th className="sticky top-0 z-10 bg-indigo-50 px-3 py-2 font-semibold text-indigo-800">{issueName} ({file2Header})</th>
-                            <th className="sticky top-0 z-10 bg-indigo-50 px-3 py-2 font-semibold text-indigo-800">Issue Difference</th>
+                  <div className="rounded-lg border border-indigo-100 max-h-80 overflow-auto">
+                    <table className="w-full text-xs min-w-[700px]">
+                      <thead>
+                        <tr className="bg-indigo-50 border-b border-indigo-100 text-left">
+                          <th className="sticky top-0 z-10 bg-indigo-50 px-3 py-2 font-semibold text-indigo-800">Candidate</th>
+                          <th className="sticky top-0 z-10 bg-indigo-50 px-3 py-2 font-semibold text-indigo-800">Flagged difference</th>
+                          <th className="sticky top-0 z-10 bg-indigo-50 px-3 py-2 font-semibold text-indigo-800">Value in {file1Header}</th>
+                          <th className="sticky top-0 z-10 bg-indigo-50 px-3 py-2 font-semibold text-indigo-800">Value in {file2Header}</th>
+                          <th className="sticky top-0 z-10 bg-indigo-50 px-3 py-2 font-semibold text-indigo-800">Difference</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {filteredInvestigationRows.map(row => (
+                          <tr key={`${row.employeeId}-${row.issue.id}`} className="border-b border-slate-100 last:border-0 align-top">
+                            <td className="px-3 py-2">
+                              <button type="button" onClick={() => onSelectTab(row.employeeId)} className="text-left text-indigo-700 hover:text-indigo-900 font-semibold">
+                                {row.bundle.employee_name || row.employeeId}
+                              </button>
+                              <div className="text-slate-500 font-mono">{row.employeeId}</div>
+                            </td>
+                            <td className="px-3 py-2 font-semibold text-slate-700">
+                              {row.differenceName}
+                              <div className="font-normal text-slate-500">{displayValue(row.source.file1_column)} / {displayValue(row.source.file2_column)}</div>
+                            </td>
+                            <td className="px-3 py-2 font-mono text-slate-700">{displayValue(row.source.file1_value ?? row.issue.old_value)}</td>
+                            <td className="px-3 py-2 font-mono text-slate-700">{displayValue(row.source.file2_value ?? row.issue.new_value)}</td>
+                            <td className="px-3 py-2 font-mono text-slate-700">{differenceValue(row.issue)}</td>
                           </tr>
-                        </thead>
-                        <tbody>
-                          {filteredInvestigationRows.map(row => {
-                            const issueSource = row.issue.source || {};
-                            const detectedSource = row.detected.source || {};
-                            return (
-                              <tr key={row.employeeId} className="border-b border-slate-100 last:border-0 align-top">
-                                <td className="px-3 py-2">
-                                  <button type="button" onClick={() => onSelectTab(row.employeeId)} className="text-left text-indigo-700 hover:text-indigo-900 font-semibold">
-                                    {row.bundle.employee_name || row.employeeId}
-                                  </button>
-                                  <div className="text-slate-500 font-mono">{row.employeeId}</div>
-                                </td>
-                                <td className="px-3 py-2 font-semibold text-slate-700">
-                                  {row.issue.field || '-'}
-                                  <div className="font-normal text-slate-500">{displayValue(issueSource.file1_column)} / {displayValue(issueSource.file2_column)}</div>
-                                </td>
-                                <td className="px-3 py-2 font-semibold text-slate-700">
-                                  {row.detected.issue.field || '-'}
-                                  <div className="font-normal text-slate-500">{displayValue(detectedSource.file1_column)} / {displayValue(detectedSource.file2_column)}</div>
-                                </td>
-                                <td className="px-3 py-2 font-mono text-slate-700">{displayValue(detectedSource.file1_value)}</td>
-                                <td className="px-3 py-2 font-mono text-slate-700">{displayValue(detectedSource.file2_value)}</td>
-                                <td className="px-3 py-2 font-mono text-slate-700">{differenceValue(row.detected.issue)}</td>
-                                <td className="px-3 py-2 font-mono text-slate-700">{displayValue(issueSource.file1_value ?? row.issue.old_value)}</td>
-                                <td className="px-3 py-2 font-mono text-slate-700">{displayValue(issueSource.file2_value ?? row.issue.new_value)}</td>
-                                <td className="px-3 py-2 font-mono text-slate-700">{differenceValue(row.issue)}</td>
-                              </tr>
-                            );
-                          })}
-                          {filteredInvestigationRows.length === 0 && (
-                            <tr><td colSpan="9" className="px-3 py-4 text-center text-slate-500 italic">No candidates match the selected detected column.</td></tr>
-                          )}
-                        </tbody>
-                      </table>
-                    </div>
-                  )}
+                        ))}
+                        {filteredInvestigationRows.length === 0 && (
+                          <tr><td colSpan="5" className="px-3 py-4 text-center text-slate-500 italic">No flagged differences match this filter.</td></tr>
+                        )}
+                      </tbody>
+                    </table>
+                  </div>
                 </div>
               )}
 
@@ -1406,11 +1408,11 @@ function EmployeeInvestigationModal({
                     </button>
                     <button
                       type="button"
-                      onClick={() => onExportDifferences(employeeIds)}
+                      onClick={() => onExportDifferences(employeeIds, investigationRows.map(row => row.issue.id).filter(Boolean))}
                       disabled={exportingDifferences || employeeIds.length === 0}
                       className="btn btn-secondary text-xs disabled:opacity-40"
                     >
-                      {exportingDifferences ? 'Exporting...' : 'Export Investigation (3 CSVs)'}
+                      {exportingDifferences ? 'Preparing...' : 'Preview Detailed CSV'}
                     </button>
                   </div>
                 ) : (
@@ -1449,11 +1451,11 @@ function EmployeeInvestigationModal({
                       </button>
                       <button
                         type="button"
-                        onClick={() => onExportDifferences(employeeIds)}
+                        onClick={() => onExportDifferences(employeeIds, investigationRows.map(row => row.issue.id).filter(Boolean))}
                         disabled={exportingDifferences || employeeIds.length === 0}
                         className="text-[11px] px-2 py-1 rounded border font-semibold bg-white hover:bg-slate-50 border-slate-200 text-slate-600 disabled:opacity-40 transition-colors"
                       >
-                        {exportingDifferences ? 'Exporting...' : 'Export Investigation (3 CSVs)'}
+                        {exportingDifferences ? 'Preparing...' : 'Preview Detailed CSV'}
                       </button>
                     </div>
                   </>
@@ -1467,11 +1469,34 @@ function EmployeeInvestigationModal({
   );
 }
 
+function DetailedExportPreviewModal({ preview, onClose, onDownload }) {
+  return (
+    <div className="fixed inset-0 z-[60] flex items-center justify-center p-4 bg-black/50">
+      <div className="bg-white rounded-xl shadow-2xl w-full max-w-7xl max-h-[calc(100vh-2rem)] flex flex-col overflow-hidden">
+        <div className="px-5 py-4 border-b border-slate-200 flex items-center justify-between gap-4">
+          <div>
+            <h2 className="text-sm font-semibold text-slate-900">Detailed CSV Preview</h2>
+            <p className="text-xs text-slate-500 mt-0.5">{preview.rows.length} flagged difference{preview.rows.length === 1 ? '' : 's'} in {preview.filename}</p>
+          </div>
+          <button type="button" onClick={onClose} className="text-slate-400 hover:text-slate-700 text-xl leading-none" aria-label="Close preview">✕</button>
+        </div>
+        <div className="p-5 overflow-auto flex-1">
+          <DataTable data={preview.rows} allowHorizontalScroll={true} />
+        </div>
+        <div className="px-5 py-3 border-t border-slate-200 flex justify-end gap-2">
+          <button type="button" onClick={onClose} className="btn btn-secondary text-xs">Cancel</button>
+          <button type="button" onClick={onDownload} className="btn btn-primary text-xs">Download CSV</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ─── Mode tab bar ─────────────────────────────────────────────────────────────
 function ModeTabBar({ mode, onChange }) {
   const tabs = [
-    { value: 'audit',  label: 'Payroll Audit'     },
-    { value: 'column', label: 'Column Comparison'  },
+    { value: 'audit', label: 'Payroll Audit' },
+    { value: 'column', label: 'Column Comparison' },
   ];
   return (
     <div className="flex rounded-xl border border-slate-200 overflow-hidden w-fit bg-slate-50 p-1 gap-1">
@@ -1480,11 +1505,10 @@ function ModeTabBar({ mode, onChange }) {
           key={tab.value}
           type="button"
           onClick={() => onChange(tab.value)}
-          className={`px-5 py-2 rounded-lg text-sm font-medium transition-all ${
-            mode === tab.value
+          className={`px-5 py-2 rounded-lg text-sm font-medium transition-all ${mode === tab.value
               ? 'bg-white text-slate-900 shadow-sm'
               : 'text-slate-500 hover:text-slate-700 hover:bg-white/60'
-          }`}
+            }`}
         >
           {tab.label}
         </button>
@@ -1504,6 +1528,8 @@ export default function Comparison() {
   const [file1ColumnsFileId, setFile1ColumnsFileId] = useState('');
   const [file2ColumnsFileId, setFile2ColumnsFileId] = useState('');
   const [loading, setLoading] = useState(false);
+  const [droppingBasicSalaryFile, setDroppingBasicSalaryFile] = useState('');
+  const [basicSalaryDropStatus, setBasicSalaryDropStatus] = useState({});
   const [result, setResult] = useState(null);
   const [errorDetails, setErrorDetails] = useState(null);
   const [reconciliationRun, setReconciliationRun] = useState(null);
@@ -1512,6 +1538,7 @@ export default function Comparison() {
   const [exportingReconciliation, setExportingReconciliation] = useState(false);
   const [exportingRoleDifferences, setExportingRoleDifferences] = useState(false);
   const [exportingInvestigatedDifferences, setExportingInvestigatedDifferences] = useState(false);
+  const [detailedExportPreview, setDetailedExportPreview] = useState(null);
   const [selectedEmployeeIds, setSelectedEmployeeIds] = useState(() => new Set());
   const [investigateEmployeeIds, setInvestigateEmployeeIds] = useState([]);
   const [investigateIssueFields, setInvestigateIssueFields] = useState([]);
@@ -1523,7 +1550,7 @@ export default function Comparison() {
   // modal can abort every pending request instead of letting them keep running unseen.
   const investigateControllersRef = useRef(new Map());
 
-  const [mode,      setMode]      = useState('audit');   // 'audit' | 'column'
+  const [mode, setMode] = useState('audit');   // 'audit' | 'column'
   const [auditType, setAuditType] = useState('full');    // 'full' | 'allowances' | 'deductions'
   const [showColumnClassification, setShowColumnClassification] = useState(false);
   const [reconFilter, setReconFilter] = useState('open'); // 'all' | 'open' | 'approved' | 'rejected' | 'ignored'
@@ -1534,25 +1561,26 @@ export default function Comparison() {
   const [reconPage, setReconPage] = useState(1);
   const [reconPageSize, setReconPageSize] = useState(50);
   const [loadingBulk, setLoadingBulk] = useState(false);
+  const [runningNameAudit, setRunningNameAudit] = useState(false);
 
   // Column definitions state
-  const [mergedCatalog,     setMergedCatalog]     = useState(PAYROLL_FIELD_CATALOG);
-  const [apiColDefs,        setApiColDefs]        = useState([]);
-  const [showColDefsManager,setShowColDefsManager] = useState(false);
-  const [undetectedCols,    setUndetectedCols]    = useState([]);
-  const [savingColDef,      setSavingColDef]      = useState(false);
+  const [mergedCatalog, setMergedCatalog] = useState(PAYROLL_FIELD_CATALOG);
+  const [apiColDefs, setApiColDefs] = useState([]);
+  const [showColDefsManager, setShowColDefsManager] = useState(false);
+  const [undetectedCols, setUndetectedCols] = useState([]);
+  const [savingColDef, setSavingColDef] = useState(false);
 
   const [matchOptions, setMatchOptions] = useState({
-    idCol1:       '',
-    idCol2:       '',
-    nameCol1:     '',
-    nameCol2:     '',
+    idCol1: '',
+    idCol2: '',
+    nameCol1: '',
+    nameCol2: '',
     normalizeIds: true,
-    keepDigits:   5,
-    tolerance:    0.01,
+    keepDigits: 0,
+    tolerance: 0.01,
   });
 
-  const [auditMappings,  setAuditMappings]  = useState([]);
+  const [auditMappings, setAuditMappings] = useState([]);
   const [columnMappings, setColumnMappings] = useState([createEmptyMapping()]);
 
   const mappingFilePair = useRef('');
@@ -1562,31 +1590,31 @@ export default function Comparison() {
   function buildRequestContext() {
     return {
       mode,
-      audit_type:          mode === 'audit' ? auditType : undefined,
-      file1_id:            file1,
-      file2_id:            file2,
-      id_col1:             matchOptions.idCol1,
-      id_col2:             matchOptions.idCol2,
+      audit_type: mode === 'audit' ? auditType : undefined,
+      file1_id: file1,
+      file2_id: file2,
+      id_col1: matchOptions.idCol1,
+      id_col2: matchOptions.idCol2,
       mapped_fields_count: activeMappings.length,
-      mapped_fields:       activeMappings.map(m => m.label || `${m.file1} / ${m.file2}`),
+      mapped_fields: activeMappings.map(m => m.label || `${m.file1} / ${m.file2}`),
     };
   }
 
   function captureError(error) {
-    const detail   = error?.response?.data?.detail;
-    let   message  = 'Unexpected error while processing request';
+    const detail = error?.response?.data?.detail;
+    let message = 'Unexpected error while processing request';
     const httpCode = error?.response?.status || null;
 
-    if      (typeof detail === 'string' && detail.trim()) message = detail;
-    else if (Array.isArray(detail))                        message = detail.map(i => i?.msg || JSON.stringify(i)).join('; ');
-    else if (detail && typeof detail === 'object')         message = detail.message || JSON.stringify(detail);
-    else if (error?.message)                               message = error.message;
+    if (typeof detail === 'string' && detail.trim()) message = detail;
+    else if (Array.isArray(detail)) message = detail.map(i => i?.msg || JSON.stringify(i)).join('; ');
+    else if (detail && typeof detail === 'object') message = detail.message || JSON.stringify(detail);
+    else if (error?.message) message = error.message;
 
     setErrorDetails({
-      title:           mode === 'audit' ? 'Failed payroll audit request' : 'Failed comparison request',
+      title: mode === 'audit' ? 'Failed payroll audit request' : 'Failed comparison request',
       message,
-      backend_code:    httpCode,
-      timestamp:       new Date().toISOString(),
+      backend_code: httpCode,
+      timestamp: new Date().toISOString(),
       request_context: buildRequestContext(),
     });
   }
@@ -1654,7 +1682,7 @@ export default function Comparison() {
     if (file1Columns.length === 0) return;
     setMatchOptions(prev => ({
       ...prev,
-      idCol1:   prev.idCol1   || inferIdColumn(file1Columns),
+      idCol1: prev.idCol1 || inferIdColumn(file1Columns),
       nameCol1: prev.nameCol1 || inferNameColumn(file1Columns),
     }));
   }, [file1Columns]);
@@ -1663,7 +1691,7 @@ export default function Comparison() {
     if (file2Columns.length === 0) return;
     setMatchOptions(prev => ({
       ...prev,
-      idCol2:   prev.idCol2   || inferIdColumn(file2Columns),
+      idCol2: prev.idCol2 || inferIdColumn(file2Columns),
       nameCol2: prev.nameCol2 || inferNameColumn(file2Columns),
     }));
   }, [file2Columns]);
@@ -1775,6 +1803,28 @@ export default function Comparison() {
     }
   }
 
+  async function handleComparisonSheetChange(fileId, sheetName) {
+    try {
+      await selectFileSheet(fileId, sheetName);
+      const columns = await loadFileColumns(fileId);
+      if (file1 === fileId) {
+        setFile1Columns(columns);
+        setFile1ColumnsFileId(fileId);
+        setMatchOptions(prev => ({ ...prev, idCol1: '', nameCol1: '' }));
+      }
+      if (file2 === fileId) {
+        setFile2Columns(columns);
+        setFile2ColumnsFileId(fileId);
+        setMatchOptions(prev => ({ ...prev, idCol2: '', nameCol2: '' }));
+      }
+      mappingFilePair.current = '';
+      await loadFiles();
+      toast.success(`Using sheet "${sheetName}"`);
+    } catch (error) {
+      toast.error(error.response?.data?.detail || 'Failed to select sheet');
+    }
+  }
+
   function handleUndetectedColChange(index, field, value) {
     setUndetectedCols(prev => prev.map((r, i) => i === index ? { ...r, [field]: value } : r));
   }
@@ -1786,10 +1836,10 @@ export default function Comparison() {
       return;
     }
     const newMappings = selected.map(r => ({
-      file1:    r.col1,
-      file2:    r.col2,
-      label:    r.label || r.col1,
-      type:     'currency',
+      file1: r.col1,
+      file2: r.col2,
+      label: r.label || r.col1,
+      type: 'currency',
       category: r.category,
     }));
     setAuditMappings(prev => [...prev, ...newMappings]);
@@ -1822,7 +1872,8 @@ export default function Comparison() {
     }
   }
 
-  async function handleRun() {
+  async function handleRun(matchUnmatchedByName = false) {
+    matchUnmatchedByName = matchUnmatchedByName === true;
     if (file1ColumnsFileId !== file1 || file2ColumnsFileId !== file2) {
       toast.error('Wait for the selected files to finish loading');
       return;
@@ -1848,20 +1899,21 @@ export default function Comparison() {
     clearErrorDetails();
     try {
       const data = await compareEmployeeData({
-        file1_id:        file1,
-        file2_id:        file2,
-        id_col1:         matchOptions.idCol1,
-        id_col2:         matchOptions.idCol2,
+        file1_id: file1,
+        file2_id: file2,
+        id_col1: matchOptions.idCol1,
+        id_col2: matchOptions.idCol2,
         column_mappings: activeMappings,
-        name_col1:       matchOptions.nameCol1 || null,
-        name_col2:       matchOptions.nameCol2 || null,
-        normalize_ids:   matchOptions.normalizeIds,
-        keep_digits:     Number(matchOptions.keepDigits) || 5,
-        tolerance:       Number(matchOptions.tolerance)  || 0.01,
-        use_ai:          false,
-        column_roles:    Object.keys(column_roles).length > 0 ? column_roles : null,
-        file1_label:     file1Label || null,
-        file2_label:     file2Label || null,
+        name_col1: matchOptions.nameCol1 || null,
+        name_col2: matchOptions.nameCol2 || null,
+        normalize_ids: matchOptions.normalizeIds,
+        keep_digits: 0,
+        tolerance: Number(matchOptions.tolerance) || 0.01,
+        use_ai: false,
+        column_roles: Object.keys(column_roles).length > 0 ? column_roles : null,
+        file1_label: file1Label || null,
+        file2_label: file2Label || null,
+        match_unmatched_by_name: matchUnmatchedByName,
       });
       const completedResult = { type: 'employee-data', ...data };
       setResult(completedResult);
@@ -1878,12 +1930,55 @@ export default function Comparison() {
         toast.error(`Completed, but review setup failed: ${data.reconciliation_warning}`);
       }
       clearErrorDetails();
-      toast.success(mode === 'audit' ? 'Payroll audit completed' : 'Comparison completed');
+      toast.success(
+        matchUnmatchedByName
+          ? `Name-based audit completed: ${data.summary?.matched_by_name || 0} unmatched employee(s) paired by name`
+          : (mode === 'audit' ? 'Payroll audit completed' : 'Comparison completed')
+      );
     } catch (error) {
       captureError(error);
       toast.error(error.response?.data?.detail || 'Request failed');
     } finally {
       setLoading(false);
+    }
+  }
+
+  async function handleRunNameBasedAudit() {
+    const unmatchedCount = unmatchedEmployeeIds.length;
+    if (unmatchedCount === 0) return;
+    if (!window.confirm(`Run a separate name-based audit for ${unmatchedCount} employee(s) identified in only one file? This creates a new reconciliation run and leaves the ID-based run unchanged.`)) return;
+
+    setRunningNameAudit(true);
+    try {
+      await handleRun(true);
+    } finally {
+      setRunningNameAudit(false);
+    }
+  }
+
+  async function handleDropBlankBasicSalary(fileNumber) {
+    const fileId = fileNumber === 1 ? file1 : file2;
+    const fileLabel = fileNumber === 1 ? selectedFileNames.fileA : selectedFileNames.fileB;
+    if (!fileId || !window.confirm(`Drop all blank or zero basic salary rows from ${fileLabel}?`)) return;
+
+    setDroppingBasicSalaryFile(fileId);
+    setBasicSalaryDropStatus(prev => ({ ...prev, [fileId]: { state: 'dropping', fileLabel } }));
+    try {
+      const response = await dropBlankBasicSalaryRows(fileId);
+      setBasicSalaryDropStatus(prev => ({
+        ...prev,
+        [fileId]: { state: 'completed', fileLabel, removedCount: response.removed_count },
+      }));
+      toast.success(`Dropped ${response.removed_count} row${response.removed_count === 1 ? '' : 's'} from ${fileLabel}`);
+      await handleRun();
+    } catch (error) {
+      setBasicSalaryDropStatus(prev => ({
+        ...prev,
+        [fileId]: { state: 'failed', fileLabel, message: error.response?.data?.detail || 'Operation failed' },
+      }));
+      toast.error(error.response?.data?.detail || 'Failed to drop blank basic salary rows');
+    } finally {
+      setDroppingBasicSalaryFile('');
     }
   }
 
@@ -1897,6 +1992,55 @@ export default function Comparison() {
     setAuditMappings(prev => prev.map((m, i) =>
       i === mappingIndex ? { ...m, threshold } : m
     ));
+  }
+
+  function handleFile1ColumnOverride(mappingIndex, col1) {
+    setAuditMappings(prev => prev.map((m, i) => {
+      if (i !== mappingIndex) return m;
+      const next = { ...m, file1: col1 };
+      if (!next.label && col1) next.label = col1;
+      next.type = inferFieldType(col1, next.file2, next.label);
+      return next;
+    }));
+  }
+
+  function handleFile2ColumnOverride(mappingIndex, col2) {
+    setAuditMappings(prev => prev.map((m, i) => {
+      if (i !== mappingIndex) return m;
+      const next = { ...m, file2: col2 };
+      if (!next.label && col2) next.label = col2;
+      next.type = inferFieldType(next.file1, col2, next.label);
+      return next;
+    }));
+  }
+
+  function handleFieldLabelOverride(mappingIndex, label) {
+    setAuditMappings(prev => prev.map((m, i) =>
+      i === mappingIndex ? { ...m, label } : m
+    ));
+  }
+
+  function handleRemoveAuditMapping(mappingIndex) {
+    setAuditMappings(prev => prev.filter((_, i) => i !== mappingIndex));
+  }
+
+  function handleAddAuditMapping() {
+    setAuditMappings(prev => [
+      ...prev,
+      { file1: '', file2: '', label: '', type: 'currency', category: 'allowances' }
+    ]);
+  }
+
+  function handleResetAuditMappings() {
+    if (!file1Columns.length || !file2Columns.length) return;
+    const mappings = inferPayrollMappingsForType(file1Columns, file2Columns, auditType, mergedCatalog);
+    setAuditMappings(mappings);
+    setUndetectedCols(computeUndetectedColumns(
+      file1Columns, file2Columns, mappings,
+      matchOptions.idCol1, matchOptions.idCol2,
+      matchOptions.nameCol1, matchOptions.nameCol2,
+    ));
+    toast.success('Mappings reset to auto-detected defaults');
   }
 
   function handleDownloadResult(fileId) {
@@ -2066,39 +2210,81 @@ export default function Comparison() {
     }
   }
 
-  async function handleExportInvestigatedDifferences(employeeIds) {
+  async function handleExportInvestigatedDifferences(employeeIds, issueIds = []) {
     const runId = reconciliationRun?.id;
     const ids = Array.from(new Set((Array.isArray(employeeIds) ? employeeIds : [employeeIds]).filter(Boolean)));
     if (!runId || ids.length === 0) return;
 
     setExportingInvestigatedDifferences(true);
     try {
-      const data = await exportInvestigatedDifferences(runId, ids);
-      const files = Object.values(data.files || {}).filter(file => file?.file_id);
-      if (files.length > 0) {
-        files.forEach(file => {
-          const link = document.createElement('a');
-          link.href = downloadCsv(file.file_id, file.filename);
-          link.download = file.filename || '';
-          document.body.appendChild(link);
-          link.click();
-          link.remove();
-        });
-        toast.success(`Generated ${files.length} investigation CSVs with ${data.differences || 0} difference record(s)`);
-      } else {
-        toast.info('No investigated differences found to export');
+      const uniqueIssueIds = Array.from(new Set(issueIds.filter(Boolean)));
+      const response = await exportInvestigatedDifferences(runId, ids, uniqueIssueIds);
+      const disposition = response.headers?.['content-disposition'] || '';
+      const filename = disposition.match(/filename="?([^";]+)"?/i)?.[1] || 'payroll_difference_details.csv';
+      const reportBlob = response.data instanceof Blob
+        ? response.data
+        : new Blob([response.data], { type: 'text/csv;charset=utf-8' });
+      if (reportBlob.size === 0) throw new Error('The server returned an empty detailed report');
+      const parsed = Papa.parse(await reportBlob.text(), {
+        header: true,
+        skipEmptyLines: true,
+      });
+      if (parsed.errors.length > 0) throw new Error(parsed.errors[0].message || 'Could not preview the detailed report');
+      if (uniqueIssueIds.length > 0 && parsed.data.length !== uniqueIssueIds.length) {
+        throw new Error(`Expected ${uniqueIssueIds.length} flagged differences but received ${parsed.data.length}`);
       }
+      setDetailedExportPreview({
+        blob: reportBlob,
+        filename,
+        rows: parsed.data,
+      });
     } catch (error) {
-      toast.error(error.response?.data?.detail || 'Failed to export investigated differences');
+      let message = error.message || 'Failed to export investigated differences';
+      const responseData = error.response?.data;
+      if (responseData instanceof Blob) {
+        try {
+          const payload = JSON.parse(await responseData.text());
+          message = payload.detail || message;
+        } catch {
+          // Keep the original browser or network error.
+        }
+      } else if (responseData?.detail) {
+        message = responseData.detail;
+      }
+      toast.error(message);
     } finally {
       setExportingInvestigatedDifferences(false);
     }
+  }
+
+  function handleDownloadDetailedExport() {
+    if (!detailedExportPreview) return;
+    const url = URL.createObjectURL(detailedExportPreview.blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = detailedExportPreview.filename;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+    toast.success(`Downloaded ${detailedExportPreview.rows.length} flagged difference(s)`);
+    setDetailedExportPreview(null);
   }
 
   const selectedFileNames = useMemo(() => ({
     fileA: file1Label || files.find(f => f.id === file1)?.filename || 'File 1',
     fileB: file2Label || files.find(f => f.id === file2)?.filename || 'File 2',
   }), [files, file1, file2, file1Label, file2Label]);
+
+  function auditFileDisplayName(name) {
+    if (name === 'only_in_file1') {
+      return `Only in ${result?.file_labels?.file1 || selectedFileNames.fileA}`;
+    }
+    if (name === 'only_in_file2') {
+      return `Only in ${result?.file_labels?.file2 || selectedFileNames.fileB}`;
+    }
+    return name;
+  }
 
   const previewColumns = useMemo(() => {
     const fileAName = selectedFileNames.fileA || 'File 1';
@@ -2174,22 +2360,22 @@ export default function Comparison() {
         cell: ({ row }) => {
           const val1 = row.original.file1_value;
           const val2 = row.original.file2_value;
-          
+
           let num1 = parseFloat(String(val1).replace(/,/g, '').replace(/[^\d.-]/g, ''));
           let num2 = parseFloat(String(val2).replace(/,/g, '').replace(/[^\d.-]/g, ''));
-          
+
           if (isNaN(num1) || isNaN(num2)) {
             return <span className="text-slate-400 text-xs italic">N/A (Text)</span>;
           }
-          
+
           const diff = num2 - num1;
           const isPos = diff > 0;
           const isZero = Math.abs(diff) < 0.0001;
-          
+
           const colorClass = isZero ? 'text-slate-500' : isPos ? 'text-emerald-600 font-semibold' : 'text-rose-600 font-semibold';
           const bgClass = isZero ? 'bg-slate-50' : isPos ? 'bg-emerald-50/50' : 'bg-rose-50/50';
           const borderClass = isZero ? 'border-slate-200/60' : isPos ? 'border-emerald-100' : 'border-rose-100';
-          
+
           return (
             <div className={`px-2.5 py-1 ${bgClass} border ${borderClass} rounded-lg font-mono text-xs ${colorClass} min-w-[85px] text-right shadow-sm inline-block`}>
               {isZero ? '0.00' : `${isPos ? '+' : ''}${formatCurrency(diff)}`}
@@ -2221,7 +2407,7 @@ export default function Comparison() {
     }
     if (reconSearch.trim()) {
       const q = reconSearch.toLowerCase().trim();
-      list = list.filter(i => 
+      list = list.filter(i =>
         (i.employee_id && String(i.employee_id).toLowerCase().includes(q)) ||
         (i.employee_name && String(i.employee_name).toLowerCase().includes(q)) ||
         (i.field && String(i.field).toLowerCase().includes(q)) ||
@@ -2236,10 +2422,44 @@ export default function Comparison() {
     return filteredIssues.slice(start, start + reconPageSize);
   }, [filteredIssues, reconPage, reconPageSize]);
 
+  const filteredEmployeeIds = useMemo(() => (
+    Array.from(new Set(filteredIssues.map(issue => issue.employee_id).filter(Boolean)))
+  ), [filteredIssues]);
+
+  const unmatchedEmployeeIds = useMemo(() => (
+    Array.from(new Set(
+      (reconciliationRun?.issues || [])
+        .filter(issue => issue.issue_type === 'potential_new_hire' || issue.issue_type === 'potential_resignation')
+        .map(issue => issue.employee_id)
+        .filter(Boolean)
+    ))
+  ), [reconciliationRun]);
+
+  const selectedFilteredEmployeeCount = useMemo(() => (
+    filteredEmployeeIds.filter(id => selectedEmployeeIds.has(id)).length
+  ), [filteredEmployeeIds, selectedEmployeeIds]);
+
+  function selectFilteredEmployees() {
+    setSelectedEmployeeIds(prev => new Set([...prev, ...filteredEmployeeIds]));
+  }
+
+  function clearFilteredEmployeeSelection() {
+    setSelectedEmployeeIds(prev => {
+      const next = new Set(prev);
+      filteredEmployeeIds.forEach(id => next.delete(id));
+      return next;
+    });
+  }
+
+  function toggleFilteredEmployeeSelection() {
+    if (filteredEmployeeIds.every(id => selectedEmployeeIds.has(id))) clearFilteredEmployeeSelection();
+    else selectFilteredEmployees();
+  }
+
   async function handleBulkAction(action) {
     const runId = reconciliationRun?.id;
     if (!runId || filteredIssues.length === 0) return;
-    
+
     const confirmMsg = `Are you sure you want to ${action} all ${filteredIssues.length} filtered issues?`;
     if (!window.confirm(confirmMsg)) return;
 
@@ -2305,6 +2525,17 @@ export default function Comparison() {
                   {files.map(f => <option key={f.id} value={f.id}>{f.filename}</option>)}
                 </select>
               </FormField>
+              {file1 && files.find(f => f.id === file1)?.sheet_names?.length > 1 && (
+                <FormField label="Worksheet" tooltip="Choose which worksheet from this Excel workbook to compare.">
+                  <select
+                    value={files.find(f => f.id === file1).selected_sheet}
+                    onChange={e => handleComparisonSheetChange(file1, e.target.value)}
+                    className="input"
+                  >
+                    {files.find(f => f.id === file1).sheet_names.map(sheet => <option key={sheet} value={sheet}>{sheet}</option>)}
+                  </select>
+                </FormField>
+              )}
               {file1 && (
                 <FormField label="Custom File Label" tooltip="Label used for this file in reports.">
                   <input
@@ -2341,6 +2572,17 @@ export default function Comparison() {
                   {files.map(f => <option key={f.id} value={f.id}>{f.filename}</option>)}
                 </select>
               </FormField>
+              {file2 && files.find(f => f.id === file2)?.sheet_names?.length > 1 && (
+                <FormField label="Worksheet" tooltip="Choose which worksheet from this Excel workbook to compare.">
+                  <select
+                    value={files.find(f => f.id === file2).selected_sheet}
+                    onChange={e => handleComparisonSheetChange(file2, e.target.value)}
+                    className="input"
+                  >
+                    {files.find(f => f.id === file2).sheet_names.map(sheet => <option key={sheet} value={sheet}>{sheet}</option>)}
+                  </select>
+                </FormField>
+              )}
               {file2 && (
                 <FormField label="Custom File Label" tooltip="Label used for this file in reports.">
                   <input
@@ -2381,13 +2623,9 @@ export default function Comparison() {
               <span className="text-slate-800 font-medium">Normalize IDs</span>
               <FieldTooltip label="Normalize IDs" text="Strips formatting from ID values so EMP-00123 and 123 can still match." />
             </label>
-            <label className="flex items-center gap-1.5 text-sm text-slate-800">
-              <span className="font-medium">ID digits to keep</span>
-              <FieldTooltip label="ID digits to keep" text="When normalizing, only the last N digits are kept. Useful when files use different ID lengths." />
-              <input type="number" min="1" max="12" value={matchOptions.keepDigits}
-                onChange={e => setMatchOptions(prev => ({ ...prev, keepDigits: e.target.value }))}
-                className="input w-20" />
-            </label>
+            <span className="text-sm text-slate-500" title="Formatting is removed, but the complete employee ID is retained.">
+              Full employee IDs used
+            </span>
             <label className="flex items-center gap-1.5 text-sm text-slate-800">
               <span className="font-medium">Numeric tolerance</span>
               <FieldTooltip label="Numeric tolerance" text="Differences below this amount are treated as equal and not flagged." />
@@ -2450,8 +2688,16 @@ export default function Comparison() {
                 {showColumnClassification && (
                   <ColumnClassificationPanel
                     mappings={auditMappings}
+                    file1Columns={file1Columns}
+                    file2Columns={file2Columns}
                     onChangeCategoryOverride={handleCategoryOverride}
                     onChangeThreshold={handleThresholdOverride}
+                    onChangeFile1Column={handleFile1ColumnOverride}
+                    onChangeFile2Column={handleFile2ColumnOverride}
+                    onChangeFieldLabel={handleFieldLabelOverride}
+                    onRemoveMapping={handleRemoveAuditMapping}
+                    onAddMapping={handleAddAuditMapping}
+                    onResetMappings={handleResetAuditMappings}
                   />
                 )}
               </div>
@@ -2474,7 +2720,7 @@ export default function Comparison() {
             )}
 
             <div className="flex justify-end pt-1">
-              <button onClick={handleRun} disabled={loading || !canRun} className="btn btn-primary px-6">
+              <button onClick={() => handleRun()} disabled={loading || !canRun} className="btn btn-primary px-6">
                 {loading ? 'Auditing…' : 'Start Audit'}
               </button>
             </div>
@@ -2571,7 +2817,7 @@ export default function Comparison() {
               >
                 Clear all
               </button>
-              <button onClick={handleRun} disabled={loading || !canRun} className="btn btn-primary text-xs">
+              <button onClick={() => handleRun()} disabled={loading || !canRun} className="btn btn-primary text-xs">
                 {loading ? 'Comparing…' : 'Run Comparison'}
               </button>
             </div>
@@ -2595,7 +2841,7 @@ export default function Comparison() {
           <details className="rounded-md border border-rose-200 bg-white p-3">
             <summary className="text-xs font-medium text-rose-700 cursor-pointer">Request context</summary>
             <pre className="mt-2 text-[11px] leading-5 text-slate-700 whitespace-pre-wrap break-words">
-{JSON.stringify(errorDetails.request_context, null, 2)}
+              {JSON.stringify(errorDetails.request_context, null, 2)}
             </pre>
           </details>
         </div>
@@ -2607,10 +2853,10 @@ export default function Comparison() {
 
           {/* Summary metrics — both modes */}
           <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-3">
-            <MetricCard title="Matched Employees"          value={formatNumber(result.summary.matched)}                       subtitle={`${selectedFileNames.fileA} vs ${selectedFileNames.fileB}`} tone="blue"  />
-            <MetricCard title="Employees With Differences" value={formatNumber(result.summary.employees_with_differences)}    subtitle={`${formatNumber(result.summary.field_differences)} field-level mismatches`}               tone="amber" />
-            <MetricCard title={`Only In ${selectedFileNames.fileA}`}             value={formatNumber(result.summary.only_in_file1)}                 subtitle={`Employees missing from ${selectedFileNames.fileB}`}                                                         tone="rose"  />
-            <MetricCard title={`Only In ${selectedFileNames.fileB}`}             value={formatNumber(result.summary.only_in_file2)}                 subtitle={`Employees missing from ${selectedFileNames.fileA}`}                                                         tone="green" />
+            <MetricCard title="Matched Employees" value={formatNumber(result.summary.matched)} subtitle={`${selectedFileNames.fileA} vs ${selectedFileNames.fileB}`} tone="blue" />
+            <MetricCard title="Employees With Differences" value={formatNumber(result.summary.employees_with_differences)} subtitle={`${formatNumber(result.summary.field_differences)} field-level mismatches`} tone="amber" />
+            <MetricCard title={`Only In ${selectedFileNames.fileA}`} value={formatNumber(result.summary.only_in_file1)} subtitle={`Employees missing from ${selectedFileNames.fileB}`} tone="rose" />
+            <MetricCard title={`Only In ${selectedFileNames.fileB}`} value={formatNumber(result.summary.only_in_file2)} subtitle={`Employees missing from ${selectedFileNames.fileA}`} tone="green" />
           </div>
 
           {/* ── Audit-mode results ─────────────────────────────────────────── */}
@@ -2619,7 +2865,7 @@ export default function Comparison() {
               <AIAuditPanel audit={result.ai_audit} />
 
               <MatchingColumnsNotice matching={result.matching_columns} />
-              <NameColumnsNotice     names={result.name_columns}       />
+              <NameColumnsNotice names={result.name_columns} />
 
               <div className="grid grid-cols-1 xl:grid-cols-3 gap-4">
                 <div className="card p-4 xl:col-span-2 space-y-3">
@@ -2630,22 +2876,38 @@ export default function Comparison() {
                   <StackedPresenceBar summary={result.summary} file1Name={selectedFileNames.fileA} file2Name={selectedFileNames.fileB} />
                   {[1, 2].map(fileNumber => {
                     const count = result.summary?.[`missing_basic_salary_count_file${fileNumber}`] || 0;
-                    if (!count) return null;
-                    const rows = result[`missing_basic_salary_sample_file${fileNumber}`] || [];
                     const fileLabel = fileNumber === 1 ? selectedFileNames.fileA : selectedFileNames.fileB;
+                    const fileId = fileNumber === 1 ? file1 : file2;
+                    const dropStatus = basicSalaryDropStatus[fileId];
+                    if (!count && !dropStatus) return null;
+                    const rows = result[`missing_basic_salary_sample_file${fileNumber}`] || [];
                     const download = result.files_created?.[`missing_basic_salary_file${fileNumber}`];
                     return (
                       <div key={fileNumber} className="pt-4 border-t border-rose-200 space-y-3">
                         <div className="flex justify-between items-start gap-3">
                           <div>
                             <h3 className="text-sm font-semibold text-rose-800 flex items-center gap-1.5">
-                              <span>⚠</span> Flagged: Blank Basic Salary in {fileLabel}
+                              <span>{count ? '⚠' : '✓'}</span> {count ? 'Flagged: Blank Basic Salary' : 'Basic Salary Cleanup'} in {fileLabel}
                             </h3>
                             <p className="text-xs text-slate-500 mt-1">
-                              {count} row{count === 1 ? '' : 's'} have a blank or zero basic salary. Every flagged row is available in the CSV download.
+                              {count
+                                ? `${count} row${count === 1 ? '' : 's'} have a blank or zero basic salary. Every flagged row is available in the CSV download.`
+                                : `No blank or zero basic salary rows remain. ${dropStatus.removedCount} row${dropStatus.removedCount === 1 ? '' : 's'} were dropped.`}
                             </p>
+                            {dropStatus?.state === 'dropping' && <p className="text-xs text-amber-700 mt-1">Dropping flagged rows…</p>}
+                            {dropStatus?.state === 'failed' && <p className="text-xs text-rose-700 mt-1">Drop failed: {dropStatus.message}</p>}
                           </div>
-                          {download && <button onClick={() => handleDownloadResult(download)} className="text-[10px] text-indigo-600 hover:text-indigo-800 font-semibold whitespace-nowrap">Download CSV</button>}
+                          <div className="flex items-center gap-3">
+                            {download && <button onClick={() => handleDownloadResult(download)} className="text-[10px] text-indigo-600 hover:text-indigo-800 font-semibold whitespace-nowrap">Download CSV</button>}
+                            {count > 0 && <button
+                              type="button"
+                              onClick={() => handleDropBlankBasicSalary(fileNumber)}
+                              disabled={droppingBasicSalaryFile === fileId || loading}
+                              className="text-[10px] text-rose-700 hover:text-rose-900 font-semibold whitespace-nowrap disabled:opacity-50"
+                            >
+                              {droppingBasicSalaryFile === fileId ? 'Dropping…' : 'Drop flagged rows'}
+                            </button>}
+                          </div>
                         </div>
                         <div className="max-h-48 overflow-y-auto text-xs divide-y divide-slate-100 bg-white rounded-lg border border-rose-200 px-3">
                           {rows.map((row, index) => (
@@ -2775,7 +3037,7 @@ export default function Comparison() {
                   <div className="flex flex-wrap gap-1.5">
                     {Object.entries(result.files_created).map(([name, id]) => (
                       <button key={name} onClick={() => handleDownloadResult(typeof id === 'object' ? id.file_id : id)} className="btn btn-secondary text-xs">
-                        {name}
+                        {auditFileDisplayName(name)}
                       </button>
                     ))}
                   </div>
@@ -2800,18 +3062,17 @@ export default function Comparison() {
                           const count = status === 'all'
                             ? (reconciliationRun.issues || []).length
                             : (reconciliationRun.status_counts?.[status] || 0);
-                          
+
                           const isActive = reconFilter === status;
                           return (
                             <button
                               key={status}
                               type="button"
                               onClick={() => { setReconFilter(status); setReconPage(1); }}
-                              className={`px-2.5 py-1 rounded transition-all capitalize ${
-                                isActive
+                              className={`px-2.5 py-1 rounded transition-all capitalize ${isActive
                                   ? 'bg-white text-slate-900 shadow-sm border border-slate-200/40'
                                   : 'text-slate-500 hover:text-slate-700 hover:bg-white/40'
-                              }`}
+                                }`}
                             >
                               {status} ({count})
                             </button>
@@ -2833,6 +3094,18 @@ export default function Comparison() {
                       >
                         {exportingRoleDifferences ? 'Exporting...' : `Export Role Differences (${roleDifferenceCount})`}
                       </button>
+                      {unmatchedEmployeeIds.length > 0 && (
+                        <button
+                          type="button"
+                          onClick={handleRunNameBasedAudit}
+                          disabled={runningNameAudit || loading}
+                          className="btn btn-secondary text-xs disabled:opacity-40"
+                        >
+                          {runningNameAudit
+                            ? 'Running Name-Based Audit...'
+                            : `Run Name-Based Audit (${unmatchedEmployeeIds.length})`}
+                        </button>
+                      )}
                     </div>
                   </div>
 
@@ -2847,7 +3120,7 @@ export default function Comparison() {
                         onChange={e => { setReconSearch(e.target.value); setReconPage(1); }}
                         className="input text-xs w-full sm:w-64 py-1.5"
                       />
-                      
+
                       {/* Issue Type Select */}
                       <select
                         value={reconTypeFilter}
@@ -2894,8 +3167,18 @@ export default function Comparison() {
                       )}
                     </div>
 
-                    <div className="text-xs text-slate-500 font-semibold">
-                      Found {filteredIssues.length} matching issues
+                    <div className="flex items-center gap-2 text-xs font-semibold">
+                      <span className="text-slate-500">Found {filteredIssues.length} matching issues</span>
+                      <button
+                        type="button"
+                        onClick={selectedFilteredEmployeeCount === filteredEmployeeIds.length ? clearFilteredEmployeeSelection : selectFilteredEmployees}
+                        disabled={filteredEmployeeIds.length === 0}
+                        className="text-indigo-700 hover:text-indigo-900 disabled:opacity-40"
+                      >
+                        {selectedFilteredEmployeeCount === filteredEmployeeIds.length
+                          ? `Clear ${filteredEmployeeIds.length} filtered candidates`
+                          : `Select all ${filteredEmployeeIds.length} filtered candidates`}
+                      </button>
                     </div>
                   </div>
 
@@ -2989,16 +3272,11 @@ export default function Comparison() {
                           <th className="w-8">
                             <input
                               type="checkbox"
-                              checked={visibleReconciliationIssues.length > 0 && visibleReconciliationIssues.every(i => selectedEmployeeIds.has(i.employee_id))}
-                              onChange={() => {
-                                const visibleIds = visibleReconciliationIssues.map(i => i.employee_id).filter(Boolean);
-                                const allSelected = visibleIds.every(id => selectedEmployeeIds.has(id));
-                                setSelectedEmployeeIds(prev => {
-                                  const next = new Set(prev);
-                                  visibleIds.forEach(id => allSelected ? next.delete(id) : next.add(id));
-                                  return next;
-                                });
-                              }}
+                              title="Select all employees in the current filter"
+                              aria-label="Select all employees in the current filter"
+                              disabled={filteredEmployeeIds.length === 0}
+                              checked={filteredEmployeeIds.length > 0 && filteredEmployeeIds.every(id => selectedEmployeeIds.has(id))}
+                              onChange={toggleFilteredEmployeeSelection}
                             />
                           </th>
                           <th>Status</th>
@@ -3014,14 +3292,14 @@ export default function Comparison() {
                       </thead>
                       <tbody>
                         {visibleReconciliationIssues.map(issue => {
-                          const isNumeric = issue.old_value !== null && issue.new_value !== null && 
-                            !isNaN(parseFloat(String(issue.old_value).replace(/,/g, ''))) && 
+                          const isNumeric = issue.old_value !== null && issue.new_value !== null &&
+                            !isNaN(parseFloat(String(issue.old_value).replace(/,/g, ''))) &&
                             !isNaN(parseFloat(String(issue.new_value).replace(/,/g, '')));
-                          
+
                           const diff = issue.difference;
                           const isPos = diff > 0;
                           const isZero = diff !== null && Math.abs(diff) < 0.0001;
-                          
+
                           const colorClass = isZero ? 'text-slate-500' : isPos ? 'text-emerald-600 font-semibold' : 'text-rose-600 font-semibold';
                           const bgClass = isZero ? 'bg-slate-50' : isPos ? 'bg-emerald-50/50' : 'bg-rose-50/50';
                           const borderClass = isZero ? 'border-slate-200/60' : isPos ? 'border-emerald-100' : 'border-rose-100';
@@ -3143,7 +3421,7 @@ export default function Comparison() {
                         Showing {((reconPage - 1) * reconPageSize) + 1}–{Math.min(reconPage * reconPageSize, filteredIssues.length)} of {filteredIssues.length} issue(s)
                         {filteredIssues.length < (reconciliationRun.issues || []).length && ` (filtered from ${(reconciliationRun.issues || []).length} total)`}
                       </div>
-                      
+
                       {/* Pagination Controls */}
                       {Math.ceil(filteredIssues.length / reconPageSize) > 1 && (
                         <div className="flex items-center gap-1.5">
@@ -3208,7 +3486,7 @@ export default function Comparison() {
                   <div className="flex flex-wrap gap-1.5">
                     {Object.entries(result.files_created).map(([name, id]) => (
                       <button key={name} onClick={() => handleDownloadResult(typeof id === 'object' ? id.file_id : id)} className="btn btn-secondary text-xs">
-                        {name}
+                        {auditFileDisplayName(name)}
                       </button>
                     ))}
                   </div>
@@ -3219,16 +3497,16 @@ export default function Comparison() {
 
           {/* Differences table — both modes */}
           {mode !== 'audit' && (
-          <div className="card p-4">
-            <div className="flex items-center justify-between gap-4 mb-3">
-              <div>
-                <h2 className="text-sm font-medium text-slate-900">Column Differences</h2>
-                <p className="text-xs text-slate-500 mt-1">Rows where the compared columns differ.</p>
+            <div className="card p-4">
+              <div className="flex items-center justify-between gap-4 mb-3">
+                <div>
+                  <h2 className="text-sm font-medium text-slate-900">Column Differences</h2>
+                  <p className="text-xs text-slate-500 mt-1">Rows where the compared columns differ.</p>
+                </div>
+                <span className="badge badge-gray">{formatNumber(result.preview_differences?.length || 0)} preview rows</span>
               </div>
-              <span className="badge badge-gray">{formatNumber(result.preview_differences?.length || 0)} preview rows</span>
+              <DataTable data={result.preview_differences || []} columns={previewColumns} allowHorizontalScroll={true} />
             </div>
-            <DataTable data={result.preview_differences || []} columns={previewColumns} allowHorizontalScroll={true} />
-          </div>
           )}
         </div>
       )}
@@ -3261,6 +3539,13 @@ export default function Comparison() {
           onInvestigateAll={handleRunInvestigationAll}
           onExportDifferences={handleExportInvestigatedDifferences}
           exportingDifferences={exportingInvestigatedDifferences}
+        />
+      )}
+      {detailedExportPreview && (
+        <DetailedExportPreviewModal
+          preview={detailedExportPreview}
+          onClose={() => setDetailedExportPreview(null)}
+          onDownload={handleDownloadDetailedExport}
         />
       )}
     </div>

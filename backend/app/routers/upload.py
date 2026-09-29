@@ -4,10 +4,15 @@ Upload router - handles file upload endpoints
 from fastapi import APIRouter, UploadFile, File, HTTPException
 from fastapi.responses import JSONResponse
 from typing import List
+from pydantic import BaseModel
 from app.services.file_service import FileService
 from app.config import MAX_FILE_SIZE, ALLOWED_EXTENSIONS
 
 router = APIRouter()
+
+
+class SelectSheetRequest(BaseModel):
+    sheet_name: str
 
 
 @router.post("/")
@@ -92,6 +97,9 @@ async def list_files(include_generated: bool = False):
     files = FileService.list_files()
     if not include_generated:
         files = [f for f in files if not f.get('is_generated', False)]
+    for file_info in files:
+        if file_info.get('file_type') in ('.xlsx', '.xls'):
+            FileService.get_sheet_names(file_info['id'])
     return {"files": files, "count": len(files)}
 
 
@@ -104,6 +112,27 @@ async def get_file_info(file_id: str):
     if not file_info:
         raise HTTPException(status_code=404, detail="File not found")
     return file_info
+
+
+@router.get("/{file_id}/sheets")
+async def get_file_sheets(file_id: str):
+    if FileService.get_file_info(file_id) is None:
+        raise HTTPException(status_code=404, detail="File not found")
+    return {
+        "sheets": FileService.get_sheet_names(file_id) or [],
+        "selected_sheet": FileService.get_file_info(file_id).get("selected_sheet"),
+    }
+
+
+@router.post("/{file_id}/sheet")
+async def select_file_sheet(file_id: str, request: SelectSheetRequest):
+    if FileService.get_file_info(file_id) is None:
+        raise HTTPException(status_code=404, detail="File not found")
+    try:
+        FileService.select_sheet(file_id, request.sheet_name)
+        return FileService.get_file_info(file_id)
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error))
 
 
 @router.get("/{file_id}/preview")

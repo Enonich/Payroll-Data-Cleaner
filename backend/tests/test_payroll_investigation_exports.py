@@ -5,7 +5,7 @@ import pandas as pd
 from app.services.reconciliation_service import ReconciliationService
 
 
-def test_investigation_export_creates_three_normalized_datasets():
+def test_investigation_export_creates_one_row_per_flagged_difference():
     issues = [
         {
             "employee_id": "66922",
@@ -114,7 +114,6 @@ def test_investigation_export_creates_three_normalized_datasets():
 
     with (
         patch.object(ReconciliationService, "get_run", return_value=run),
-        patch.object(ReconciliationService, "get_employee_bundle", return_value=bundle),
         patch.object(ReconciliationService, "_record_audit"),
         patch("app.services.reconciliation_service.FileService.get_file_info", side_effect=[
             {"filename": "hr_source.csv"},
@@ -124,38 +123,23 @@ def test_investigation_export_creates_three_normalized_datasets():
     ):
         result = ReconciliationService.export_investigated_differences("run-1", ["66922"])
 
-    assert set(result["files"]) == {
-        "payroll_difference_summary",
-        "payroll_difference_details",
-        "payroll_employee_comparison",
-    }
-    assert set(generated) == {
-        "payroll_difference_summary_2026-05.csv",
-        "payroll_difference_details_2026-05.csv",
-        "payroll_employee_comparison_2026-05.csv",
-    }
+    assert set(generated) == {"payroll_difference_details_2026-05_run1.csv"}
 
-    details = generated["payroll_difference_details_2026-05.csv"]
+    details = generated["payroll_difference_details_2026-05_run1.csv"]
     assert details.columns.tolist() == [
         "employee_id", "employee_name", "difference_type", "field_name",
-        "source_value", "payroll_value", "numeric_difference", "source_column",
-        "payroll_column", "source_file", "payroll_file", "financial_impact",
-        "status", "investigation_note",
+        "HR Source_value", "Payroll May2026_value", "numeric_difference",
+    ]
+    assert len(details) == len(issues)
+    assert details["field_name"].tolist() == [
+        "Taxable Allowance", "Provident Fund Deduction", "Take Home", "Employee Name"
     ]
     assert details["difference_type"].tolist() == [
         "allowance_difference", "deduction_difference", "take_home_difference", "name_mismatch"
     ]
+    assert details["HR Source_value"].tolist() == [0, 375.292125, 9247.28, "ENOCH OWUSU OKYERE"]
+    assert details["Payroll May2026_value"].tolist() == [830.88, 0, 9257.79, "Enoch Owusu Okyere"]
 
-    summary = generated["payroll_difference_summary_2026-05.csv"].iloc[0]
-    assert summary["difference_count"] == 4
-    assert summary["allowance_differences"] == 1
-    assert summary["deduction_differences"] == 1
-    assert summary["field_mismatches"] == 1
-    assert summary["take_home_difference"] == 10.51
-
-    comparison = generated["payroll_employee_comparison_2026-05.csv"]
-    basic_salary = comparison[comparison["field_name"] == "Basic Salary"].iloc[0]
-    taxable_allowance = comparison[comparison["field_name"] == "Taxable Allowance"].iloc[0]
-    assert basic_salary["match"] == "Yes"
-    assert taxable_allowance["difference"] == 830.88
-    assert taxable_allowance["match"] == "No"
+    assert result["file"]["filename"] == "payroll_difference_details_2026-05_run1.csv"
+    assert result["file"]["records"] == len(issues)
+    assert result["report_bytes"].decode("utf-8-sig").count("\n") == len(issues) + 1

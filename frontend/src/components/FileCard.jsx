@@ -1,7 +1,7 @@
 import { FileSpreadsheet, Trash2, Eye, Download } from 'lucide-react';
 import { Link } from 'react-router-dom';
 
-export default function FileCard({ file, onDelete, onDownload }) {
+export default function FileCard({ file, onDelete, onDownload, onSheetChange }) {
   const formatSize = (bytes) => {
     if (bytes < 1024) return `${bytes} B`;
     if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
@@ -71,6 +71,20 @@ export default function FileCard({ file, onDelete, onDownload }) {
           </span>
         )}
       </div>
+      {file.sheet_names?.length > 1 && (
+        <label className="block mt-3">
+          <span className="text-[10px] font-semibold uppercase tracking-wide text-slate-500">Active sheet</span>
+          <select
+            value={file.selected_sheet || file.sheet_names[0]}
+            onChange={(event) => onSheetChange?.(file.id, event.target.value)}
+            className="input mt-1 w-full text-xs"
+          >
+            {file.sheet_names.map((sheetName) => (
+              <option key={sheetName} value={sheetName}>{sheetName}</option>
+            ))}
+          </select>
+        </label>
+      )}
       <p className="mt-2 text-xs text-slate-400">
         {formatDate(file.uploaded_at)}
       </p>

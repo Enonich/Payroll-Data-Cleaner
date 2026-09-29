@@ -4,6 +4,7 @@ Reconciliation review endpoints.
 from typing import Optional, List
 
 from fastapi import APIRouter, HTTPException
+from fastapi.responses import Response
 from pydantic import BaseModel
 
 from app.services.reconciliation_service import ReconciliationService
@@ -27,6 +28,7 @@ class BulkIssueActionRequest(BaseModel):
 
 class InvestigatedDifferencesExportRequest(BaseModel):
     employee_ids: List[str]
+    issue_ids: Optional[List[str]] = None
 
 
 @router.get("/")
@@ -95,9 +97,26 @@ async def export_role_differences(run_id: str):
 @router.post("/{run_id}/export-investigated-differences")
 async def export_investigated_differences(run_id: str, request: InvestigatedDifferencesExportRequest):
     try:
-        return ReconciliationService.export_investigated_differences(run_id, request.employee_ids)
+        result = ReconciliationService.export_investigated_differences(
+            run_id,
+            request.employee_ids,
+            request.issue_ids,
+        )
+        report_bytes = result["report_bytes"]
+        return Response(
+            content=report_bytes,
+            media_type="text/csv; charset=utf-8",
+            headers={
+                "Content-Disposition": f'attachment; filename="{result["file"]["filename"]}"',
+                "Content-Length": str(len(report_bytes)),
+                "Cache-Control": "no-store, no-cache, must-revalidate",
+                "Pragma": "no-cache",
+            },
+        )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to create investigation report: {exc}")
 
 
 @router.get("/{run_id}/report")

@@ -19,6 +19,11 @@ def _normalized_column_name(column: str) -> str:
     return ''.join(ch.lower() if ch.isalnum() else ' ' for ch in str(column)).strip()
 
 
+def _filename_label(label: str, fallback: str) -> str:
+    cleaned = ''.join(ch if ch.isalnum() or ch in ('-', '_') else '_' for ch in str(label).strip())
+    return cleaned.strip('_') or fallback
+
+
 def _find_column_by_aliases(df, aliases: List[str]) -> Optional[str]:
     normalized = {
         ' '.join(_normalized_column_name(col).split()): col
@@ -97,6 +102,10 @@ class SalaryComparisonRequest(BaseModel):
     tolerance: float = 0.01
 
 
+class DropBlankBasicSalaryRequest(BaseModel):
+    file_id: str
+
+
 class EmployeePresenceRequest(BaseModel):
     file1_id: str
     file2_id: str
@@ -132,6 +141,7 @@ class EmployeeDataComparisonRequest(BaseModel):
     column_roles: Optional[Dict[str, str]] = None
     file1_label: Optional[str] = None
     file2_label: Optional[str] = None
+    match_unmatched_by_name: bool = False
 
 
 class AllowanceDeductionRequest(BaseModel):
@@ -335,6 +345,11 @@ async def compare_employee_data(request: EmployeeDataComparisonRequest):
         df2_compare = df2.copy()
         resolved_name_col1 = _resolve_name_column(df1_compare, request.name_col1, "file1")
         resolved_name_col2 = _resolve_name_column(df2_compare, request.name_col2, "file2")
+        if request.match_unmatched_by_name and (not resolved_name_col1 or not resolved_name_col2):
+            raise HTTPException(
+                status_code=400,
+                detail="Select or provide an employee name column in both files before running the name-based audit",
+            )
         effective_mappings = _ensure_name_mapping(
             request.column_mappings,
             resolved_name_col1,
@@ -356,12 +371,20 @@ async def compare_employee_data(request: EmployeeDataComparisonRequest):
             effective_mappings,
             resolved_name_col1, resolved_name_col2,
             request.normalize_ids, matching_columns.get("keep_digits", request.keep_digits),
-            request.tolerance
+            request.tolerance,
+            request.match_unmatched_by_name,
         )
 
         ai_audit = None
         if request.use_ai and config.LLM_AUDIT_ENABLED:
             ai_audit = AIComparisonService.generate_audit(result, column_roles=request.column_roles)
+
+        file1_info = FileService.get_file_info(request.file1_id) or {}
+        file2_info = FileService.get_file_info(request.file2_id) or {}
+        file1_label = request.file1_label or file1_info.get("filename", "File 1")
+        file2_label = request.file2_label or file2_info.get("filename", "File 2")
+        file1_filename_label = _filename_label(file1_label, "file1")
+        file2_filename_label = _filename_label(file2_label, "file2")
 
         files_created = {}
         if len(result['mismatches_df']) > 0:
@@ -372,12 +395,12 @@ async def compare_employee_data(request: EmployeeDataComparisonRequest):
         if len(result['only_in_file1_df']) > 0:
             files_created['only_in_file1'] = FileService.create_new_file(
                 result['only_in_file1_df'],
-                "employees_only_in_file1.csv"
+                f"employees_only_in_{file1_filename_label}.csv"
             )
         if len(result['only_in_file2_df']) > 0:
             files_created['only_in_file2'] = FileService.create_new_file(
                 result['only_in_file2_df'],
-                "employees_only_in_file2.csv"
+                f"employees_only_in_{file2_filename_label}.csv"
             )
         if len(result.get('missing_ids_df1', [])) > 0:
             files_created['missing_ids_file1'] = FileService.create_new_file(
@@ -403,10 +426,6 @@ async def compare_employee_data(request: EmployeeDataComparisonRequest):
         reconciliation_payload = None
         reconciliation_warning = None
         try:
-            file1_info = FileService.get_file_info(request.file1_id) or {}
-            file2_info = FileService.get_file_info(request.file2_id) or {}
-            file1_label = request.file1_label or file1_info.get("filename", "File 1")
-            file2_label = request.file2_label or file2_info.get("filename", "File 2")
             reconciliation_run = ReconciliationService.create_run_from_employee_data_result(
                 request.file1_id,
                 request.file2_id,
@@ -429,6 +448,7 @@ async def compare_employee_data(request: EmployeeDataComparisonRequest):
                 "total_file1": result['total_file1'],
                 "total_file2": result['total_file2'],
                 "matched": result['matched'],
+                "matched_by_name": result['matched_by_name'],
                 "only_in_file1": result['only_in_file1'],
                 "only_in_file2": result['only_in_file2'],
                 "employees_with_differences": result['employees_with_differences'],
@@ -456,9 +476,14 @@ async def compare_employee_data(request: EmployeeDataComparisonRequest):
                 "file2": resolved_name_col2,
                 "auto_mapped": bool(resolved_name_col1 and resolved_name_col2),
             },
+            "audit_match_mode": "name_for_unmatched" if request.match_unmatched_by_name else "id_only",
             "presence_preview": {
                 "only_in_file1": result['only_in_file1_preview'],
                 "only_in_file2": result['only_in_file2_preview'],
+            },
+            "file_labels": {
+                "file1": file1_label,
+                "file2": file2_label,
             },
             "reconciliation_run": reconciliation_payload,
             "reconciliation_warning": reconciliation_warning,
@@ -469,6 +494,20 @@ async def compare_employee_data(request: EmployeeDataComparisonRequest):
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/drop-blank-basic-salary")
+async def drop_blank_basic_salary(request: DropBlankBasicSalaryRequest):
+    """Remove all rows whose basic salary is blank or zero from a source file."""
+    if FileService.get_file_info(request.file_id) is None:
+        raise HTTPException(status_code=404, detail="File not found")
+    try:
+        removed_count = ComparisonService.drop_missing_basic_salary_rows(request.file_id)
+        return {"removed_count": removed_count}
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error))
+    except Exception as error:
+        raise HTTPException(status_code=500, detail=str(error))
 
 
 @router.post("/generate-allowances")

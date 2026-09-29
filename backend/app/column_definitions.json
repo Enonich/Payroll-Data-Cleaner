@@ -276,7 +276,15 @@
     {
       "label": "Income Tax",
       "aliases": [
-        "income tax"
+        "income tax",
+        "incometax",
+        "tax",
+        "paye",
+        "paye tax",
+        "tax deducted",
+        "p.a.y.e",
+        "p.a.y.e.",
+        "payee"
       ],
       "category": "deductions",
       "type": "currency"

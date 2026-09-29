@@ -301,7 +301,7 @@ class DataCleaningService:
         type_hints = {}
         
         for col in df.columns:
-            col_lower = col.lower().strip()
+            col_lower = str(col).lower().strip()
             
             # Staff ID detection
             if any(x in col_lower for x in ['staff_id', 'staffid', 'staff id', 'employee id', 'emp_id']):

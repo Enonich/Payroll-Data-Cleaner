@@ -148,7 +148,13 @@ class ReconciliationService:
         explanation = f"{field or 'Field'} differs between {file1_label} and {file2_label}."
         category = str(row.get("category") or "").lower()
 
-        if any(token in field_key for token in ["rank", "grade", "level"]):
+        if row.get("matching_method") == "unique_name_match":
+            suggested_action = "Confirm the employee ID update before approving payroll changes"
+            explanation = (
+                "Records were linked by a unique normalized employee name, despite a different "
+                f"ID in {file1_label} and {file2_label}."
+            )
+        elif any(token in field_key for token in ["rank", "grade", "level"]):
             issue_type = "rank_change"
             suggested_action = f"Approve {file1_label} rank update if promotion/grade change is valid"
             explanation = f"Rank changed from {row.get('file1_value')} (in {file1_label}) to {row.get('file2_value')} (in {file2_label})."
@@ -415,23 +421,32 @@ class ReconciliationService:
         run = cls.get_run(run_id)
         target = str(employee_id).strip().lower()
 
+        issues = [
+            issue for issue in run["issues"]
+            if str(issue.get("employee_id") or "").strip().lower() == target
+        ]
+        file1_targets = {target}
+        file2_targets = {target}
+        for issue in issues:
+            source = issue.get("source") or {}
+            if source.get("file1_id") is not None:
+                file1_targets.add(str(source["file1_id"]).strip().lower())
+            if source.get("file2_id") is not None:
+                file2_targets.add(str(source["file2_id"]).strip().lower())
+
         df1 = FileService.get_dataframe(run["source_file1_id"])
         df2 = FileService.get_dataframe(run["source_file2_id"])
         id_col1 = cls._find_id_column(df1)
         id_col2 = cls._find_id_column(df2)
 
-        def _rows_for(df: Optional[pd.DataFrame], id_col: Optional[str]) -> List[Dict[str, Any]]:
+        def _rows_for(df: Optional[pd.DataFrame], id_col: Optional[str], targets: set) -> List[Dict[str, Any]]:
             if df is None or id_col is None:
                 return []
-            mask = df[id_col].astype(str).str.strip().str.lower() == target
+            mask = df[id_col].astype(str).str.strip().str.lower().isin(targets)
             return [cls._json_safe_row(row) for row in df[mask].to_dict("records")]
 
-        file1_rows = _rows_for(df1, id_col1)
-        file2_rows = _rows_for(df2, id_col2)
-        issues = [
-            issue for issue in run["issues"]
-            if str(issue.get("employee_id") or "").strip().lower() == target
-        ]
+        file1_rows = _rows_for(df1, id_col1, file1_targets)
+        file2_rows = _rows_for(df2, id_col2, file2_targets)
 
         if not file1_rows and not file2_rows and not issues:
             raise ValueError(f"No records found for employee '{employee_id}' in this run")
@@ -650,7 +665,12 @@ class ReconciliationService:
         return {"run_id": run_id, "role_differences": len(role_issues), "files": files}
 
     @classmethod
-    def export_investigated_differences(cls, run_id: str, employee_ids: List[str]) -> Dict[str, Any]:
+    def export_investigated_differences(
+        cls,
+        run_id: str,
+        employee_ids: List[str],
+        issue_ids: Optional[List[str]] = None,
+    ) -> Dict[str, Any]:
         run = cls.get_run(run_id)
         targets = {
             str(employee_id).strip().lower()
@@ -664,6 +684,12 @@ class ReconciliationService:
             issue for issue in run.get("issues", [])
             if str(issue.get("employee_id") or "").strip().lower() in targets
         ]
+        requested_issue_ids = {str(issue_id) for issue_id in issue_ids or [] if issue_id}
+        if requested_issue_ids:
+            issues = [issue for issue in issues if str(issue.get("id")) in requested_issue_ids]
+            found_issue_ids = {str(issue.get("id")) for issue in issues}
+            if found_issue_ids != requested_issue_ids:
+                raise ValueError("Some displayed investigation issues are no longer available; reopen the investigation and retry")
 
         file1_label = run.get("file1_label") or "File 1"
         file2_label = run.get("file2_label") or "File 2"
@@ -671,6 +697,11 @@ class ReconciliationService:
         payroll_info = FileService.get_file_info(run.get("source_file2_id")) or {}
         source_filename = source_info.get("filename") or file1_label
         payroll_filename = payroll_info.get("filename") or file2_label
+        source_value_column = f"{file1_label}_value"
+        payroll_value_column = f"{file2_label}_value"
+        if file1_label == file2_label:
+            source_value_column = f"{file1_label}_file1_value"
+            payroll_value_column = f"{file2_label}_file2_value"
 
         def is_blank(value: Any) -> bool:
             if value is None:
@@ -720,8 +751,14 @@ class ReconciliationService:
         detail_rows: List[Dict[str, Any]] = []
         for issue in issues:
             source = issue.get("source") or {}
-            source_value = source.get("file1_value", issue.get("old_value"))
-            payroll_value = source.get("file2_value", issue.get("new_value"))
+            source_column = source.get("file1_column")
+            payroll_column = source.get("file2_column")
+            source_value = source.get("file1_value")
+            payroll_value = source.get("file2_value")
+            if is_blank(source_value) and not is_blank(issue.get("old_value")):
+                source_value = issue.get("old_value")
+            if is_blank(payroll_value) and not is_blank(issue.get("new_value")):
+                payroll_value = issue.get("new_value")
             numeric_difference = issue.get("difference")
             if numeric_difference is None:
                 source_number = number_value(source_value)
@@ -729,128 +766,19 @@ class ReconciliationService:
                 if source_number is not None and payroll_number is not None:
                     numeric_difference = payroll_number - source_number
             classified_type = difference_type(issue, source_value, payroll_value)
-            financial_impact = numeric_difference if classified_type in {
-                "amount_difference", "allowance_difference", "deduction_difference", "take_home_difference"
-            } else None
+            # Use the flagged difference's own name (as shown in the investigation panel) rather
+            # than the raw source column(s), so every export row identifies its difference exactly
+            # the way the reviewer saw it -- never a rolled-up/summarized label.
+            actual_field_name = issue.get("field") or source_column or payroll_column or "Employee Status"
             detail_rows.append({
                 "employee_id": issue.get("employee_id"),
                 "employee_name": issue.get("employee_name") or source.get("file2_name") or source.get("file1_name"),
                 "difference_type": classified_type,
-                "field_name": issue.get("field") or source.get("file1_column") or source.get("file2_column") or "Employee Status",
-                "source_value": source_value,
-                "payroll_value": payroll_value,
+                "field_name": actual_field_name,
+                source_value_column: source_value,
+                payroll_value_column: payroll_value,
                 "numeric_difference": numeric_difference,
-                "source_column": source.get("file1_column"),
-                "payroll_column": source.get("file2_column"),
-                "source_file": source_filename,
-                "payroll_file": payroll_filename,
-                "financial_impact": financial_impact,
-                "status": issue.get("status"),
-                "investigation_note": issue.get("explanation"),
             })
-
-        summary_rows: List[Dict[str, Any]] = []
-        for target in sorted(targets):
-            employee_details = [
-                row for row in detail_rows
-                if str(row.get("employee_id") or "").strip().lower() == target
-            ]
-            if not employee_details:
-                continue
-            statuses = sorted({str(row["status"]) for row in employee_details if row.get("status")})
-            summary_rows.append({
-                "employee_id": employee_details[0].get("employee_id"),
-                "employee_name": employee_details[0].get("employee_name"),
-                "difference_count": len(employee_details),
-                "total_financial_difference": sum(
-                    float(row["financial_impact"])
-                    for row in employee_details
-                    if row.get("financial_impact") is not None
-                ),
-                "allowance_differences": sum(row["difference_type"] == "allowance_difference" for row in employee_details),
-                "deduction_differences": sum(row["difference_type"] == "deduction_difference" for row in employee_details),
-                "field_mismatches": sum(row["difference_type"] in {"field_mismatch", "name_mismatch", "account_mismatch"} for row in employee_details),
-                "take_home_difference": sum(
-                    float(row["numeric_difference"])
-                    for row in employee_details
-                    if row["difference_type"] == "take_home_difference" and row.get("numeric_difference") is not None
-                ),
-                "status": statuses[0] if len(statuses) == 1 else ", ".join(statuses),
-            })
-
-        comparison_rows: List[Dict[str, Any]] = []
-        for target in sorted(targets):
-            bundle = cls.get_employee_bundle(run_id, target)
-            source_row = bundle.get("file1_rows", [{}])[0] if bundle.get("file1_rows") else {}
-            payroll_row = bundle.get("file2_rows", [{}])[0] if bundle.get("file2_rows") else {}
-            source_id_column = cls._find_id_column(pd.DataFrame([source_row])) if source_row else None
-            payroll_id_column = cls._find_id_column(pd.DataFrame([payroll_row])) if payroll_row else None
-
-            def name_column(row: Dict[str, Any]) -> Optional[str]:
-                return next((key for key in row if "name" in str(key).lower()), None)
-
-            excluded_source = {column for column in (source_id_column, name_column(source_row)) if column}
-            excluded_payroll = {column for column in (payroll_id_column, name_column(payroll_row)) if column}
-            used_source: set = set()
-            used_payroll: set = set()
-            field_pairs: List[tuple] = []
-
-            for issue in bundle.get("issues", []):
-                issue_source = issue.get("source") or {}
-                source_column = issue_source.get("file1_column")
-                payroll_column = issue_source.get("file2_column")
-                if not source_column and not payroll_column:
-                    continue
-                pair = (issue.get("field") or source_column or payroll_column, source_column, payroll_column)
-                if pair not in field_pairs:
-                    field_pairs.append(pair)
-                    if source_column:
-                        used_source.add(source_column)
-                    if payroll_column:
-                        used_payroll.add(payroll_column)
-
-            normalized_payroll = {
-                re.sub(r"[^a-z0-9]", "", str(column).lower()): column
-                for column in payroll_row
-                if column not in excluded_payroll and column not in used_payroll
-            }
-            for source_column in source_row:
-                if source_column in excluded_source or source_column in used_source:
-                    continue
-                normalized = re.sub(r"[^a-z0-9]", "", str(source_column).lower())
-                payroll_column = normalized_payroll.get(normalized)
-                field_pairs.append((source_column, source_column, payroll_column))
-                used_source.add(source_column)
-                if payroll_column:
-                    used_payroll.add(payroll_column)
-            for payroll_column in payroll_row:
-                if payroll_column not in excluded_payroll and payroll_column not in used_payroll:
-                    field_pairs.append((payroll_column, None, payroll_column))
-
-            for field_name, source_column, payroll_column in field_pairs:
-                source_value = source_row.get(source_column) if source_column else None
-                payroll_value = payroll_row.get(payroll_column) if payroll_column else None
-                source_number = number_value(source_value)
-                payroll_number = number_value(payroll_value)
-                numeric_difference = (
-                    payroll_number - source_number
-                    if source_number is not None and payroll_number is not None
-                    else None
-                )
-                values_match = (
-                    abs(numeric_difference) < 0.0000001
-                    if numeric_difference is not None
-                    else str(source_value or "").strip().casefold() == str(payroll_value or "").strip().casefold()
-                )
-                comparison_rows.append({
-                    "employee_id": bundle.get("employee_id"),
-                    "employee_name": bundle.get("employee_name"),
-                    "field_name": field_name,
-                    "source_value": source_value,
-                    "payroll_value": payroll_value,
-                    "difference": numeric_difference,
-                    "match": "Yes" if values_match else "No",
-                })
 
         period_candidates = [payroll_filename, file2_label, source_filename, file1_label]
         month_names = {
@@ -879,26 +807,18 @@ class ReconciliationService:
         if not period:
             period = str(run.get("created_at") or cls._now())[:7]
 
-        exports = {
-            "payroll_difference_summary": summary_rows,
-            "payroll_difference_details": detail_rows,
-            "payroll_employee_comparison": comparison_rows,
-        }
-        files: Dict[str, Dict[str, Any]] = {}
-        for export_name, rows in exports.items():
-            if not rows:
-                continue
-            dataframe = pd.DataFrame(rows)
-            filename = f"{export_name}_{period}.csv"
-            file_id = FileService.create_new_file(dataframe, filename)
-            files[export_name] = {"file_id": file_id, "records": len(dataframe), "filename": filename}
+        dataframe = pd.DataFrame(detail_rows)
+        run_suffix = re.sub(r"[^a-zA-Z0-9]", "", str(run_id))[:8] or "audit"
+        filename = f"payroll_difference_details_{period}_{run_suffix}.csv"
+        file_id = FileService.create_new_file(dataframe, filename)
+        report_bytes = dataframe.to_csv(index=False).encode("utf-8-sig")
 
         cls._record_audit(
             run_id,
             None,
             "investigated_differences_exported",
             "system",
-            f"Generated {len(files)} payroll investigation exports for {len(targets)} employee(s)",
+            f"Generated detailed payroll investigation export for {len(targets)} employee(s)",
             None,
             None,
         )
@@ -906,7 +826,8 @@ class ReconciliationService:
             "run_id": run_id,
             "candidates": len(targets),
             "differences": len(issues),
-            "files": files,
+            "file": {"file_id": file_id, "records": len(dataframe), "filename": filename},
+            "report_bytes": report_bytes,
         }
 
     @classmethod

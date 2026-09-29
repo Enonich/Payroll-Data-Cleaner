@@ -2,7 +2,7 @@ import { useState, useEffect } from 'react';
 import toast from 'react-hot-toast';
 import FileUploader from '../components/FileUploader';
 import FileCard from '../components/FileCard';
-import { uploadFile, listFiles, deleteFile, downloadCsv } from '../services/api';
+import { uploadFile, listFiles, deleteFile, downloadCsv, selectFileSheet } from '../services/api';
 
 export default function Upload() {
   const [files, setFiles] = useState([]);
@@ -49,6 +49,16 @@ export default function Upload() {
     }
   };
 
+  const handleSheetChange = async (fileId, sheetName) => {
+    try {
+      await selectFileSheet(fileId, sheetName);
+      toast.success(`Using sheet "${sheetName}"`);
+      await loadFiles();
+    } catch (error) {
+      toast.error(error.response?.data?.detail || 'Failed to select sheet');
+    }
+  };
+
   const handleDownload = (fileId) => {
     const file = files.find(f => f.id === fileId);
     const url = downloadCsv(fileId, file?.filename);
@@ -83,6 +93,7 @@ export default function Upload() {
                 file={file}
                 onDelete={handleDelete}
                 onDownload={handleDownload}
+                onSheetChange={handleSheetChange}
               />
             ))}
           </div>

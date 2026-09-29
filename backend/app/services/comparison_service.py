@@ -134,13 +134,10 @@ class ComparisonService:
         if not normalize_ids:
             return cleaned
 
-        digits = ''.join(ch for ch in cleaned if ch.isdigit())
-        if not digits:
+        normalized = ''.join(ch for ch in cleaned.upper() if ch.isalnum())
+        if not normalized:
             return ''
-
-        if keep_digits > 0:
-            digits = digits[-keep_digits:]
-        return digits
+        return normalized
 
     @staticmethod
     def _json_safe_scalar(value: Any) -> Any:
@@ -338,6 +335,43 @@ class ComparisonService:
         return similarity < 0.65
 
     @staticmethod
+    def _name_match_key(value: Any) -> str:
+        """Build an order-independent key for a conservative name fallback match."""
+        return ' '.join(sorted(ComparisonService._name_tokens(value)))
+
+    @classmethod
+    def _match_unmatched_ids_by_name(
+        cls,
+        df1: pd.DataFrame,
+        df2: pd.DataFrame,
+        merge_col: str,
+        name_col1: Optional[str],
+        name_col2: Optional[str],
+    ) -> List[str]:
+        """Link changed IDs only when a normalized name occurs once in each file.
+
+        This intentionally does not fuzzy-match spelling variants: a false payroll match is
+        riskier than leaving an employee in the manual-review queue.
+        """
+        if not name_col1 or not name_col2 or name_col1 not in df1.columns or name_col2 not in df2.columns:
+            return []
+
+        unmatched1 = df1.loc[~df1[merge_col].isin(df2[merge_col])].copy()
+        unmatched2 = df2.loc[~df2[merge_col].isin(df1[merge_col])].copy()
+        unmatched1['_name_match_key'] = unmatched1[name_col1].apply(cls._name_match_key)
+        unmatched2['_name_match_key'] = unmatched2[name_col2].apply(cls._name_match_key)
+
+        counts1 = unmatched1.loc[unmatched1['_name_match_key'] != '', '_name_match_key'].value_counts()
+        counts2 = unmatched2.loc[unmatched2['_name_match_key'] != '', '_name_match_key'].value_counts()
+        unique_keys = sorted(set(counts1[counts1 == 1].index) & set(counts2[counts2 == 1].index))
+
+        for key in unique_keys:
+            synthetic_id = f'_name_match:{key}'
+            df1.loc[unmatched1.index[unmatched1['_name_match_key'] == key], merge_col] = synthetic_id
+            df2.loc[unmatched2.index[unmatched2['_name_match_key'] == key], merge_col] = synthetic_id
+        return unique_keys
+
+    @staticmethod
     def _find_context_column(columns: Any, terms: List[str]) -> Optional[str]:
         """Find a grade/notch context column without requiring it to be audited."""
         for column in columns:
@@ -404,6 +438,25 @@ class ComparisonService:
             })
         return len(missing), samples, missing
 
+    @classmethod
+    def drop_missing_basic_salary_rows(cls, file_id: str) -> int:
+        """Remove rows with a blank or zero basic salary from an uploaded file."""
+        from app.services.file_service import FileService
+
+        df = FileService.get_dataframe(file_id)
+        if df is None:
+            raise ValueError("File not found")
+
+        basic_column = cls._find_basic_salary_column(df.columns)
+        if not basic_column:
+            raise ValueError("No basic salary column found")
+
+        missing_mask = df[basic_column].apply(cls._is_blank_or_zero)
+        removed_count = int(missing_mask.sum())
+        if removed_count:
+            FileService.update_dataframe(file_id, df.loc[~missing_mask].reset_index(drop=True))
+        return removed_count
+
     @staticmethod
     def _values_differ(value1: Any, value2: Any, value_type: str, tolerance: float) -> bool:
         if value_type == 'name':
@@ -425,7 +478,8 @@ class ComparisonService:
                               name_col2: Optional[str] = None,
                               normalize_ids: bool = True,
                               keep_digits: int = 5,
-                              tolerance: float = 0.01) -> Dict[str, Any]:
+                              tolerance: float = 0.01,
+                              match_unmatched_by_name: bool = False) -> Dict[str, Any]:
         """
         Compare employee records across files and return field-level issues.
         column_mappings: [{"file1": "Grade", "file2": "Rank", "label": "Grade", "type": "grade"}]
@@ -439,6 +493,14 @@ class ComparisonService:
         df2_work[merge_col] = ComparisonService._normalized_id_series(
             df2_work[id_col2], normalize_ids, keep_digits
         )
+
+        name_matched_keys = (
+            ComparisonService._match_unmatched_ids_by_name(
+                df1_work, df2_work, merge_col, name_col1, name_col2
+            )
+            if match_unmatched_by_name else []
+        )
+        name_matched_ids = {f'_name_match:{key}' for key in name_matched_keys}
 
         # Employees whose ID column could not be normalised (blank, None, non-numeric, etc.)
         # These are excluded from all matching — surface them so the caller can fix them.
@@ -499,6 +561,10 @@ class ComparisonService:
             how='inner',
             suffixes=('_file1', '_file2')
         )
+        if match_unmatched_by_name:
+            # This is a separate, targeted audit. Never re-audit employees who already
+            # matched by ID in the original payroll run.
+            merged = merged[merged[merge_col].isin(name_matched_ids)].copy()
 
         def merged_col_name(column: str, side: str) -> str:
             suffix = f'_{side}'
@@ -510,6 +576,36 @@ class ComparisonService:
 
         for _, row in merged.iterrows():
             employee_issue_count = 0
+            employee_id = (
+                row[merged_col_name(id_col2, 'file2')]
+                if row[merge_col] in name_matched_ids
+                else row[merge_col]
+            )
+
+            if row[merge_col] in name_matched_ids:
+                employee_issue_count += 1
+                issue = {
+                    'issue_type': 'field_mismatch',
+                    'employee_id': employee_id,
+                    'file1_id': row[merged_col_name(id_col1, 'file1')],
+                    'file2_id': row[merged_col_name(id_col2, 'file2')],
+                    'field': 'Employee ID',
+                    'file1_column': id_col1,
+                    'file2_column': id_col2,
+                    'file1_value': row[merged_col_name(id_col1, 'file1')],
+                    'file2_value': row[merged_col_name(id_col2, 'file2')],
+                    'comparison_type': 'text',
+                    'matching_method': 'unique_name_match',
+                }
+                if name_col1 and merged_col_name(name_col1, 'file1') in merged.columns:
+                    issue['file1_name'] = row[merged_col_name(name_col1, 'file1')]
+                if name_col2 and merged_col_name(name_col2, 'file2') in merged.columns:
+                    issue['file2_name'] = row[merged_col_name(name_col2, 'file2')]
+                mismatch_rows.append({
+                    key: ComparisonService._json_safe_scalar(value)
+                    for key, value in issue.items()
+                })
+
             for mapping in column_mappings:
                 col1 = mapping['file1']
                 col2 = mapping['file2']
@@ -527,7 +623,7 @@ class ComparisonService:
                     employee_issue_count += 1
                     issue = {
                         'issue_type': 'field_mismatch',
-                        'employee_id': row[merge_col],
+                        'employee_id': employee_id,
                         'file1_id': row[merged_col_name(id_col1, 'file1')],
                         'file2_id': row[merged_col_name(id_col2, 'file2')],
                         'field': label,
@@ -570,7 +666,7 @@ class ComparisonService:
                 employee_issue_count += 1
                 issue = {
                     'issue_type': 'field_mismatch',
-                    'employee_id': row[merge_col],
+                    'employee_id': employee_id,
                     'file1_id': row[merged_col_name(id_col1, 'file1')],
                     'file2_id': row[merged_col_name(id_col2, 'file2')],
                     'field': context_name,
@@ -633,6 +729,7 @@ class ComparisonService:
             'total_file1': len(df1),
             'total_file2': len(df2),
             'matched': len(merged),
+            'matched_by_name': len(name_matched_ids),
             'only_in_file1': len(only_in_file1),
             'only_in_file2': len(only_in_file2),
             'employees_with_differences': issue_employee_count,

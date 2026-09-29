@@ -38,6 +38,11 @@ export const getFileInfo = async (fileId) => {
   return response.data;
 };
 
+export const selectFileSheet = async (fileId, sheetName) => {
+  const response = await api.post(`/upload/${fileId}/sheet`, { sheet_name: sheetName });
+  return response.data;
+};
+
 export const getFilePreview = async (fileId, rows = 100) => {
   const response = await api.get(`/upload/${fileId}/preview?rows=${rows}`);
   return response.data;
@@ -188,6 +193,11 @@ export const compareEmployeeData = async (options) => {
   return response.data;
 };
 
+export const dropBlankBasicSalaryRows = async (fileId) => {
+  const response = await api.post('/comparison/drop-blank-basic-salary', { file_id: fileId });
+  return response.data;
+};
+
 export const generateAllowanceFiles = async (options) => {
   const response = await api.post('/comparison/generate-allowances', options);
   return response.data;
@@ -241,11 +251,12 @@ export const exportRoleDifferences = async (runId) => {
   return response.data;
 };
 
-export const exportInvestigatedDifferences = async (runId, employeeIds) => {
+export const exportInvestigatedDifferences = async (runId, employeeIds, issueIds = []) => {
   const response = await api.post(`/reconciliation/${runId}/export-investigated-differences`, {
     employee_ids: employeeIds,
-  });
-  return response.data;
+    issue_ids: issueIds,
+  }, { responseType: 'blob' });
+  return response;
 };
 
 export const getReconciliationReport = async (runId) => {
