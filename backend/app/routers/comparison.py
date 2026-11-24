@@ -142,6 +142,8 @@ class EmployeeDataComparisonRequest(BaseModel):
     file1_label: Optional[str] = None
     file2_label: Optional[str] = None
     match_unmatched_by_name: bool = False
+    include_name_mapping: bool = True
+    include_presence_issues: Optional[bool] = None
 
 
 class AllowanceDeductionRequest(BaseModel):
@@ -350,11 +352,14 @@ async def compare_employee_data(request: EmployeeDataComparisonRequest):
                 status_code=400,
                 detail="Select or provide an employee name column in both files before running the name-based audit",
             )
-        effective_mappings = _ensure_name_mapping(
-            request.column_mappings,
-            resolved_name_col1,
-            resolved_name_col2,
-        )
+        if request.include_name_mapping:
+            effective_mappings = _ensure_name_mapping(
+                request.column_mappings,
+                resolved_name_col1,
+                resolved_name_col2,
+            )
+        else:
+            effective_mappings = [m.copy() for m in request.column_mappings]
 
         matching_columns = ComparisonService.resolve_matching_columns(
             df1_compare,
@@ -426,12 +431,18 @@ async def compare_employee_data(request: EmployeeDataComparisonRequest):
         reconciliation_payload = None
         reconciliation_warning = None
         try:
+            include_presence = (
+                request.include_presence_issues
+                if request.include_presence_issues is not None
+                else request.include_name_mapping
+            )
             reconciliation_run = ReconciliationService.create_run_from_employee_data_result(
                 request.file1_id,
                 request.file2_id,
                 file1_label,
                 file2_label,
                 result,
+                include_presence_issues=include_presence,
             )
             reconciliation_payload = {
                 "id": reconciliation_run["id"],

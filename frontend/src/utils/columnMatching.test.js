@@ -59,3 +59,14 @@ test('correctly maps TAX column to Income Tax', () => {
 
   assert.equal(match, 'TAX');
 });
+
+test('correctly maps Total Allowance to Taxable Allowance aliases', () => {
+  const match = findBestColumn(
+    ['Total Allowance'],
+    ['taxable allowance', 'taxableallowance', 'total allowance', 'totalallowance'],
+    new Set(),
+    'currency',
+  );
+
+  assert.equal(match, 'Total Allowance');
+});

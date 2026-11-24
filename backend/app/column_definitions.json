@@ -47,7 +47,13 @@
       "aliases": [
         "taxable allowance",
         "taxableallowance",
-        "taxable alloc"
+        "taxable allow",
+        "taxable allow.",
+        "taxable alloc",
+        "total allowance",
+        "totalallowance",
+        "total allow",
+        "total alloc"
       ],
       "category": "allowances",
       "type": "currency"

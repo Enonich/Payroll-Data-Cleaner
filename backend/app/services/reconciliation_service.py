@@ -222,6 +222,7 @@ class ReconciliationService:
         result: Dict[str, Any],
         file1_label: str = "File 1",
         file2_label: str = "File 2",
+        include_presence_issues: bool = True,
     ) -> List[Dict[str, Any]]:
         mismatch_rows = result["mismatches_df"].to_dict("records") if len(result["mismatches_df"]) else []
         employee_fields: Dict[str, set] = {}
@@ -251,39 +252,40 @@ class ReconciliationService:
                 "source": cls._json_safe_row(row),
             })
 
-        for row in result["only_in_file1_df"].to_dict("records") if len(result["only_in_file1_df"]) else []:
-            employee_id = cls._string_value(next((row.get(k) for k in row.keys() if "id" in str(k).lower()), None))
-            employee_name = cls._string_value(next((row.get(k) for k in row.keys() if "name" in str(k).lower()), None))
-            issues.append({
-                "issue_type": "potential_resignation",
-                "employee_id": employee_id,
-                "employee_name": employee_name,
-                "field": "Employee Status",
-                "old_value": f"Present in {file1_label}",
-                "new_value": f"Missing from {file2_label}",
-                "difference": None,
-                "confidence": 0.9,
-                "suggested_action": f"Generate {file1_label} offboarding/resignation review",
-                "explanation": f"Employee appears in {file1_label} but is missing from {file2_label}.",
-                "source": cls._json_safe_row(row),
-            })
+        if include_presence_issues:
+            for row in result["only_in_file1_df"].to_dict("records") if len(result["only_in_file1_df"]) else []:
+                employee_id = cls._string_value(next((row.get(k) for k in row.keys() if "id" in str(k).lower()), None))
+                employee_name = cls._string_value(next((row.get(k) for k in row.keys() if "name" in str(k).lower()), None))
+                issues.append({
+                    "issue_type": "potential_resignation",
+                    "employee_id": employee_id,
+                    "employee_name": employee_name,
+                    "field": "Employee Status",
+                    "old_value": f"Present in {file1_label}",
+                    "new_value": f"Missing from {file2_label}",
+                    "difference": None,
+                    "confidence": 0.9,
+                    "suggested_action": f"Generate {file1_label} offboarding/resignation review",
+                    "explanation": f"Employee appears in {file1_label} but is missing from {file2_label}.",
+                    "source": cls._json_safe_row(row),
+                })
 
-        for row in result["only_in_file2_df"].to_dict("records") if len(result["only_in_file2_df"]) else []:
-            employee_id = cls._string_value(next((row.get(k) for k in row.keys() if "id" in str(k).lower()), None))
-            employee_name = cls._string_value(next((row.get(k) for k in row.keys() if "name" in str(k).lower()), None))
-            issues.append({
-                "issue_type": "potential_new_hire",
-                "employee_id": employee_id,
-                "employee_name": employee_name,
-                "field": "Employee Status",
-                "old_value": f"Missing from {file1_label}",
-                "new_value": f"Present in {file2_label}",
-                "difference": None,
-                "confidence": 0.9,
-                "suggested_action": f"Generate {file2_label} onboarding/import review",
-                "explanation": f"Employee appears in {file2_label} but is missing from {file1_label}.",
-                "source": cls._json_safe_row(row),
-            })
+            for row in result["only_in_file2_df"].to_dict("records") if len(result["only_in_file2_df"]) else []:
+                employee_id = cls._string_value(next((row.get(k) for k in row.keys() if "id" in str(k).lower()), None))
+                employee_name = cls._string_value(next((row.get(k) for k in row.keys() if "name" in str(k).lower()), None))
+                issues.append({
+                    "issue_type": "potential_new_hire",
+                    "employee_id": employee_id,
+                    "employee_name": employee_name,
+                    "field": "Employee Status",
+                    "old_value": f"Missing from {file1_label}",
+                    "new_value": f"Present in {file2_label}",
+                    "difference": None,
+                    "confidence": 0.9,
+                    "suggested_action": f"Generate {file2_label} onboarding/import review",
+                    "explanation": f"Employee appears in {file2_label} but is missing from {file1_label}.",
+                    "source": cls._json_safe_row(row),
+                })
 
         return issues
 
@@ -295,6 +297,7 @@ class ReconciliationService:
         file1_label: str,
         file2_label: str,
         result: Dict[str, Any],
+        include_presence_issues: bool = True,
     ) -> Dict[str, Any]:
         run_id = str(uuid.uuid4())
         now = cls._now()
@@ -319,7 +322,7 @@ class ReconciliationService:
             (run_id, file1_id, file2_id, file1_label, file2_label, DBService.dumps_json(summary), now, now),
         )
 
-        issue_rows = cls._issue_rows_from_result(result, file1_label, file2_label)
+        issue_rows = cls._issue_rows_from_result(result, file1_label, file2_label, include_presence_issues=include_presence_issues)
         for issue in issue_rows:
             issue_id = str(uuid.uuid4())
             DBService.execute(

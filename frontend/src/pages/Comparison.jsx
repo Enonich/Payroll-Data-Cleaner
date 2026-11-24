@@ -3,7 +3,13 @@ import toast from 'react-hot-toast';
 import Papa from 'papaparse';
 import DataTable from '../components/DataTable';
 import FormField, { FieldTooltip } from '../components/FormField';
-import { findBestColumn, scoreColumnMatch } from '../utils/columnMatching';
+import { findBestColumn } from '../utils/columnMatching';
+import {
+  PAYROLL_FIELD_CATALOG,
+  buildMergedCatalog,
+  computeUndetectedColumns,
+  inferPayrollMappingsForType,
+} from '../utils/payrollAuditMappings';
 import {
   listFiles,
   getFileColumns,
@@ -24,28 +30,6 @@ import {
   investigateEmployee,
   getEmployeeBundle,
 } from '../services/api';
-
-const PAYROLL_FIELD_CATALOG = [
-  { label: 'Name',             aliases: ['name', 'employee name', 'fullname', 'full name'],                                    type: 'text',     category: 'identity'   },
-  { label: 'Branch',           aliases: ['branch', 'location', 'office'],                                                      type: 'text',     category: 'identity'   },
-  { label: 'Annual Salary',    aliases: ['annual salary', 'annualsalary'],                                                     type: 'currency', category: 'earnings'   },
-  { label: 'Basic Salary',     aliases: ['basic salary', 'basicsalary', 'basic', 'monthly salary', 'monthlysalary', 'basic salary (monthly salary)', 'basic salary monthly salary'], type: 'currency', category: 'earnings'   },
-  { label: 'Taxable Allowance',aliases: ['taxable allowance', 'taxableallowance', 'taxable allow', 'taxable allow.', 'taxable alloc'], type: 'currency', category: 'allowances' },
-  { label: '5.5% SSF',         aliases: ['5.5% ssf', '55 ssf', '55ssf', 'ssf 5.5', 'ssf5.5', '5.5% ssf employee', 'employee ssf'], type: 'currency', category: 'statutory_deductions' },
-  { label: '4.5% Staff PF',    aliases: ['4.5% staff pf', '45staffpf', 'staff pf', 'staffpf', '45 pf', '7.5%pf staff', 'tier 3 provident fund employee', 'pf staff'], type: 'currency', category: 'statutory_deductions' },
-  { label: 'Tax Relief',       aliases: ['tax relief', 'taxrelief', 'tax/mortgage relief', 'mortgage relief', 'tax relieve'],  type: 'currency', category: 'statutory_deductions' },
-  { label: 'Taxable Salary',   aliases: ['taxable salary', 'taxablesalary', 'taxable pay'],                                   type: 'currency', category: 'earnings'   },
-  { label: 'Income Tax',       aliases: ['income tax', 'incometax', 'paye', 'tax', 'paye tax', 'tax deducted', 'p.a.y.e', 'p.a.y.e.', 'payee'], type: 'currency', category: 'statutory_deductions' },
-  { label: 'Other Deductions', aliases: ['other deductions', 'otherdeductions'],                                               type: 'currency', category: 'non_statutory_deductions' },
-  { label: 'Deductions',       aliases: ['deductions', 'deduction'],                                                           type: 'currency', category: 'deductions' },
-  { label: 'Total Deductions', aliases: ['total deductions', 'totaldeductions', 'total deduct'],                               type: 'currency', category: 'deductions' },
-  { label: 'Take Home',        aliases: ['take home', 'takehome', 'net pay', 'netpay', 'net sal', 'net salary'],               type: 'currency', category: 'earnings'   },
-  { label: '13% SSF',          aliases: ['13% ssf', '13ssf'],                                                                  type: 'currency', category: 'statutory_deductions' },
-  { label: '11% PF',           aliases: ['11% pf', '11pf'],                                                                   type: 'currency', category: 'statutory_deductions' },
-  { label: '1st Tier (13.5%)', aliases: ['1st tier (13.5%)', '1st tier 13.5', '1sttier135', 'first tier 13.5'],               type: 'currency', category: 'statutory_deductions' },
-  { label: '1st Tier (5%)',    aliases: ['1st tier (5%)', '1st tier 5', '1sttier5', 'first tier 5'],                          type: 'currency', category: 'statutory_deductions' },
-  { label: '3rd Tier (15.5%)', aliases: ['3rd tier (15.5%)', '3rd tier 15.5', '3rdtier155', 'third tier 15.5'],               type: 'currency', category: 'statutory_deductions' },
-];
 
 const AUDIT_RESULT_STORAGE_KEY = 'payroll-audit-result';
 
@@ -83,86 +67,7 @@ function inferFieldType(col1, col2, label) {
 }
 
 function createEmptyMapping() {
-  return { file1: '', file2: '', label: '', type: 'text' };
-}
-
-// type: 'full' | 'allowances' | 'deductions'
-function inferPayrollMappingsForType(columns1, columns2, type = 'full', catalog = PAYROLL_FIELD_CATALOG) {
-  const used1 = new Set();
-  const used2 = new Set();
-  const mappings = [];
-
-  const filtered = catalog.filter(field => {
-    if (field.label === 'Name') return false;
-    if (type === 'full') return field.category !== 'identity';
-    if (type === 'allowances') return field.category === 'earnings' || field.category === 'allowances';
-    if (type === 'deductions') return field.category === 'earnings' || ['deductions', 'statutory_deductions', 'non_statutory_deductions'].includes(field.category);
-    return false;
-  });
-
-  for (const field of filtered) {
-    const col1 = findBestColumn(columns1, field.aliases, used1, field.type);
-    const col2 = findBestColumn(columns2, field.aliases, used2, field.type);
-    if (col1 && col2) {
-      used1.add(col1);
-      used2.add(col2);
-      mappings.push({ file1: col1, file2: col2, label: field.label, type: field.type, category: field.category });
-    }
-  }
-  return mappings;
-}
-
-// Merge API-loaded column definition entries with the base catalog.
-// API entries whose label already exists in the base catalog are skipped.
-function buildMergedCatalog(apiEntries) {
-  const base = PAYROLL_FIELD_CATALOG;
-  const baseLabels = new Set(base.map(e => e.label.toLowerCase()));
-  const extras = (apiEntries || [])
-    .filter(e => !baseLabels.has((e.label || '').toLowerCase()))
-    .map(e => ({
-      label: e.label,
-      aliases: Array.isArray(e.aliases) ? e.aliases : [],
-      type: e.type || 'currency',
-      category: e.category || 'allowances',
-    }));
-  return [...base, ...extras];
-}
-
-// Find columns in both files that were NOT matched by any catalog entry.
-// Returns array of { col1, col2, label, category } objects ready for the user to classify.
-function computeUndetectedColumns(cols1, cols2, currentMappings, idCol1, idCol2, nameCol1, nameCol2) {
-  const mappedFile1 = new Set(currentMappings.map(m => m.file1).filter(Boolean));
-  const mappedFile2 = new Set(currentMappings.map(m => m.file2).filter(Boolean));
-  const exclude1 = new Set([idCol1, nameCol1].filter(Boolean));
-  const exclude2 = new Set([idCol2, nameCol2].filter(Boolean));
-
-  const undetected1 = cols1.filter(c => !mappedFile1.has(c) && !exclude1.has(c));
-  const undetected2 = cols2.filter(c => !mappedFile2.has(c) && !exclude2.has(c));
-
-  const pairs = [];
-  const used2 = new Set();
-
-  for (const col1 of undetected1) {
-    let bestMatch = '';
-    let bestScore = 0;
-    for (const col2 of undetected2) {
-      if (used2.has(col2)) continue;
-      const score = scoreColumnMatch(col1, [col2]);
-      if (score > bestScore) { bestScore = score; bestMatch = col2; }
-    }
-    if (bestMatch && bestScore >= 40) {
-      used2.add(bestMatch);
-      pairs.push({ col1, col2: bestMatch, label: col1, category: 'allowances', include: false });
-    } else {
-      pairs.push({ col1, col2: '', label: col1, category: 'allowances', include: false });
-    }
-  }
-  for (const col2 of undetected2) {
-    if (!used2.has(col2)) {
-      pairs.push({ col1: '', col2, label: col2, category: 'allowances', include: false });
-    }
-  }
-  return pairs;
+  return { file1: '', file2: '', label: '', type: 'currency', category: 'auto', threshold: '' };
 }
 
 function formatNumber(value, digits = 0) {
@@ -175,6 +80,70 @@ function formatNumber(value, digits = 0) {
 
 function formatCurrency(value) {
   return formatNumber(value, 2);
+}
+
+function parseNumericValue(val) {
+  if (val === null || val === undefined || val === '') return NaN;
+  if (typeof val === 'number') return val;
+  const str = String(val).replace(/[^0-9.-]/g, '');
+  if (!str || str === '-' || str === '.') return NaN;
+  const num = parseFloat(str);
+  return isNaN(num) ? NaN : num;
+}
+
+function getIssueDifferenceVal(issue) {
+  if (!issue) return null;
+  if (issue.difference !== null && issue.difference !== undefined && issue.difference !== '') {
+    const d = parseNumericValue(issue.difference);
+    if (!isNaN(d)) return d;
+  }
+  const oldVal = parseNumericValue(issue.old_value);
+  const newVal = parseNumericValue(issue.new_value);
+  if (!isNaN(oldVal) && !isNaN(newVal)) {
+    return newVal - oldVal;
+  }
+  return null;
+}
+
+function getComparableIssueNumber(value, allowPlainNumber = false) {
+  if (value === null || value === undefined) return 0;
+  if (typeof value === 'number') return Number.isFinite(value) ? value : null;
+
+  const text = String(value).trim();
+  if (!text || /^[-–—−]$/.test(text) || /^[+]?(?:0+)(?:\.0+)?$/.test(text)) return 0;
+  const hasAmountFormatting = /[,.]|GH₵|GHȼ|[$£€₵]/.test(text);
+  if (!hasAmountFormatting && (!allowPlainNumber || !/^[+-]?(?:\d+\.?\d*|\.\d+)$/.test(text))) return null;
+
+  const number = parseNumericValue(text);
+  return Number.isFinite(number) ? number : null;
+}
+
+function hasMeaningfulIssueDifference(issue, fallbackTolerance) {
+  const thresholdValue = issue?.threshold ?? issue?.source?.threshold ?? fallbackTolerance;
+  const threshold = Number.isFinite(Number(thresholdValue)) ? Math.max(0, Number(thresholdValue)) : 0.0001;
+  const effectiveThreshold = Math.max(threshold, 0.0001);
+
+  const oldValue = issue?.old_value ?? issue?.source?.file1_value;
+  const newValue = issue?.new_value ?? issue?.source?.file2_value;
+  const comparisonType = String(issue?.comparison_type ?? issue?.source?.comparison_type ?? '').toLowerCase();
+  const hasAmountFormatting = [oldValue, newValue].some(value =>
+    typeof value === 'number' || /[,.]|GH₵|GHȼ|[$£€₵]/.test(String(value ?? ''))
+  );
+  const compareAsNumber = ['currency', 'number', 'numeric'].includes(comparisonType) || hasAmountFormatting;
+  const oldNumber = getComparableIssueNumber(oldValue, compareAsNumber);
+  const newNumber = getComparableIssueNumber(newValue, compareAsNumber);
+  if (oldNumber !== null && newNumber !== null) {
+    return Number(oldNumber.toFixed(2)) !== Number(newNumber.toFixed(2));
+  }
+
+  const recordedDifference = issue?.difference !== null && issue?.difference !== undefined && issue?.difference !== ''
+    ? parseNumericValue(issue.difference)
+    : NaN;
+  if (Number.isFinite(recordedDifference)) return Math.abs(recordedDifference) > effectiveThreshold;
+
+  const oldText = String(oldValue ?? '').trim().replace(/\s+/g, ' ').toUpperCase();
+  const newText = String(newValue ?? '').trim().replace(/\s+/g, ' ').toUpperCase();
+  return oldText !== newText;
 }
 
 function MetricCard({ title, value, subtitle, tone = 'slate' }) {
@@ -770,8 +739,8 @@ function NameColumnsNotice({ names }) {
 // ─── Audit type card selector ─────────────────────────────────────────────────
 const AUDIT_TYPES = [
   { value: 'full', label: 'Full Payroll Audit', description: 'All mapped payroll fields — earnings, allowances and deductions.', accent: 'blue' },
-  { value: 'allowances', label: 'Allowances Audit', description: 'Earnings and allowance columns only.', accent: 'emerald' },
-  { value: 'deductions', label: 'Deductions Audit', description: 'Deduction and tax columns with earnings as context.', accent: 'violet' },
+  { value: 'allowances', label: 'Allowances Audit', description: 'Allowance columns only.', accent: 'emerald' },
+  { value: 'deductions', label: 'Deductions Audit', description: 'Deduction and tax columns only.', accent: 'violet' },
 ];
 
 function AuditTypeSelector({ value, onChange }) {
@@ -1830,23 +1799,29 @@ export default function Comparison() {
   }
 
   function handleAddUndetectedToAudit() {
-    const selected = undetectedCols.filter(r => r.include && r.col1 && r.col2);
+    const selected = undetectedCols.filter(r => r.include && (r.col1 || r.col2));
     if (selected.length === 0) {
-      toast.error('Select rows with both file columns filled in to add them');
+      toast.error('Select rows with columns filled in to add them');
       return;
     }
     const newMappings = selected.map(r => ({
       file1: r.col1,
       file2: r.col2,
-      label: r.label || r.col1,
+      label: r.label || r.col1 || r.col2,
       type: 'currency',
-      category: r.category,
+      category: r.category || 'allowances',
+      threshold: '',
     }));
-    setAuditMappings(prev => [...prev, ...newMappings]);
+    if (mode === 'audit') {
+      setAuditMappings(prev => [...prev, ...newMappings]);
+    } else {
+      setColumnMappings(prev => [...prev, ...newMappings]);
+    }
     // Remove the added rows from undetected list
-    const addedCol1s = new Set(selected.map(r => r.col1));
-    setUndetectedCols(prev => prev.filter(r => !addedCol1s.has(r.col1)));
-    toast.success(`Added ${newMappings.length} column(s) to the audit`);
+    const addedCol1s = new Set(selected.map(r => r.col1).filter(Boolean));
+    const addedCol2s = new Set(selected.map(r => r.col2).filter(Boolean));
+    setUndetectedCols(prev => prev.filter(r => !addedCol1s.has(r.col1) && !addedCol2s.has(r.col2)));
+    toast.success(`Added ${newMappings.length} column pair(s)`);
   }
 
   async function handleSaveUndetectedToConfig() {
@@ -1895,6 +1870,13 @@ export default function Comparison() {
       }
     });
 
+    const isColumnMode = mode === 'column';
+    const isFullPayrollAudit = mode === 'audit' && auditType === 'full';
+    const hasExplicitNameMapping = activeMappings.some(
+      m => (m.label || '').trim().toLowerCase() === 'name' || m.type === 'name'
+    );
+    const includeNameMapping = isFullPayrollAudit || hasExplicitNameMapping;
+
     setLoading(true);
     clearErrorDetails();
     try {
@@ -1914,14 +1896,14 @@ export default function Comparison() {
         file1_label: file1Label || null,
         file2_label: file2Label || null,
         match_unmatched_by_name: matchUnmatchedByName,
+        include_name_mapping: includeNameMapping,
+        include_presence_issues: isFullPayrollAudit,
       });
       const completedResult = { type: 'employee-data', ...data };
       setResult(completedResult);
-      if (mode === 'audit') {
-        window.localStorage.setItem(AUDIT_RESULT_STORAGE_KEY, JSON.stringify(completedResult));
-      }
+      window.localStorage.setItem(AUDIT_RESULT_STORAGE_KEY, JSON.stringify(completedResult));
       setReconciliationExport(null);
-      if (mode === 'audit' && data.reconciliation_run?.id) {
+      if (data.reconciliation_run?.id) {
         await refreshReconciliationRun(data.reconciliation_run.id);
       } else {
         setReconciliationRun(null);
@@ -1946,7 +1928,7 @@ export default function Comparison() {
   async function handleRunNameBasedAudit() {
     const unmatchedCount = unmatchedEmployeeIds.length;
     if (unmatchedCount === 0) return;
-    if (!window.confirm(`Run a separate name-based audit for ${unmatchedCount} employee(s) identified in only one file? This creates a new reconciliation run and leaves the ID-based run unchanged.`)) return;
+    if (!window.confirm(`Compare the mapped payroll fields for ${unmatchedCount} employee(s) currently unmatched by ID, pairing unique names from the selected name columns? This creates a separate reconciliation run and leaves the ID-based run unchanged.`)) return;
 
     setRunningNameAudit(true);
     try {
@@ -2386,23 +2368,31 @@ export default function Comparison() {
     ];
   }, [selectedFileNames]);
 
+  const issuesWithDifferences = useMemo(() => {
+    const tolerance = Math.max(0.0001, Number(matchOptions.tolerance) || 0.01);
+    return (reconciliationRun?.issues || []).filter(issue => hasMeaningfulIssueDifference(issue, tolerance));
+  }, [reconciliationRun, matchOptions.tolerance]);
+
   const filteredIssues = useMemo(() => {
-    let list = reconciliationRun?.issues || [];
-    if (reconFilter !== 'all') {
+    let list = issuesWithDifferences;
+    if (mode === 'audit' && reconFilter !== 'all') {
       list = list.filter(i => i.status === reconFilter);
     }
-    if (reconTypeFilter !== 'all') {
+    if (mode === 'audit' && reconTypeFilter !== 'all') {
       list = list.filter(i => i.issue_type === reconTypeFilter);
     }
-    const differenceValue = Math.abs(Number(reconDifferenceValue));
-    if (reconDifferenceOperator !== 'any' && reconDifferenceValue !== '' && Number.isFinite(differenceValue)) {
+    const targetVal = parseNumericValue(reconDifferenceValue);
+    if (reconDifferenceOperator !== 'any' && !isNaN(targetVal)) {
+      const targetAbs = Math.abs(targetVal);
       list = list.filter(i => {
-        if (i.difference === null || i.difference === undefined || i.difference === '') return false;
-        const difference = Math.abs(Number(i.difference));
-        if (!Number.isFinite(difference)) return false;
-        if (reconDifferenceOperator === 'greater_than') return difference > differenceValue;
-        if (reconDifferenceOperator === 'less_than') return difference < differenceValue;
-        return Math.abs(difference - differenceValue) < 0.005;
+        const diff = getIssueDifferenceVal(i);
+        if (diff === null || isNaN(diff)) return false;
+        const diffAbs = Math.abs(diff);
+
+        if (reconDifferenceOperator === 'greater_than') return diffAbs > targetAbs;
+        if (reconDifferenceOperator === 'less_than') return diffAbs < targetAbs;
+        if (reconDifferenceOperator === 'equal_to') return Math.abs(diffAbs - targetAbs) < 0.01 || Math.abs(diff - targetVal) < 0.01;
+        return true;
       });
     }
     if (reconSearch.trim()) {
@@ -2415,12 +2405,16 @@ export default function Comparison() {
       );
     }
     return list;
-  }, [reconciliationRun, reconFilter, reconTypeFilter, reconSearch, reconDifferenceOperator, reconDifferenceValue]);
+  }, [issuesWithDifferences, mode, reconFilter, reconTypeFilter, reconSearch, reconDifferenceOperator, reconDifferenceValue]);
 
   const visibleReconciliationIssues = useMemo(() => {
     const start = (reconPage - 1) * reconPageSize;
     return filteredIssues.slice(start, start + reconPageSize);
   }, [filteredIssues, reconPage, reconPageSize]);
+
+  const visibleEmployeeIds = useMemo(() => (
+    Array.from(new Set(visibleReconciliationIssues.map(issue => issue.employee_id).filter(Boolean)))
+  ), [visibleReconciliationIssues]);
 
   const filteredEmployeeIds = useMemo(() => (
     Array.from(new Set(filteredIssues.map(issue => issue.employee_id).filter(Boolean)))
@@ -2451,9 +2445,18 @@ export default function Comparison() {
     });
   }
 
-  function toggleFilteredEmployeeSelection() {
-    if (filteredEmployeeIds.every(id => selectedEmployeeIds.has(id))) clearFilteredEmployeeSelection();
-    else selectFilteredEmployees();
+  function toggleVisibleEmployeeSelection() {
+    if (visibleEmployeeIds.length === 0) return;
+    const allSelected = visibleEmployeeIds.every(id => selectedEmployeeIds.has(id));
+    setSelectedEmployeeIds(prev => {
+      const next = new Set(prev);
+      if (allSelected) {
+        visibleEmployeeIds.forEach(id => next.delete(id));
+      } else {
+        visibleEmployeeIds.forEach(id => next.add(id));
+      }
+      return next;
+    });
   }
 
   async function handleBulkAction(action) {
@@ -2730,62 +2733,35 @@ export default function Comparison() {
         {/* ── Column Comparison mode config ────────────────────────────────── */}
         {mode === 'column' && (
           <div className="p-5 space-y-4">
-            <div>
-              <h2 className="text-sm font-semibold text-slate-900">Column Pairs</h2>
-              <p className="text-xs text-slate-500 mt-0.5">
-                Map a column from File 1 to a column in File 2 for each field you want to compare.
-              </p>
+            <div className="flex items-center justify-between gap-2 flex-wrap">
+              <div>
+                <h2 className="text-sm font-semibold text-slate-900">Column Pairs</h2>
+                <p className="text-xs text-slate-500 mt-0.5">
+                  Map a column from File 1 to a column in File 2 for each field you want to compare. Configure categories and tolerance thresholds per column.
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowColDefsManager(true)}
+                className="text-xs text-blue-600 hover:text-blue-800 font-medium flex items-center gap-1 border border-blue-200 rounded-lg px-3 py-1.5 bg-blue-50 hover:bg-blue-100 transition-colors"
+              >
+                ⚙ Manage Column Definitions
+              </button>
             </div>
 
-            <div className="overflow-x-auto border border-slate-200 rounded-xl">
-              <table className="data-table">
-                <thead>
-                  <tr>
-                    <th>Label</th>
-                    <th>File 1 column</th>
-                    <th>File 2 column</th>
-                    <th className="w-16" />
-                  </tr>
-                </thead>
-                <tbody>
-                  {columnMappings.map((mapping, index) => (
-                    <tr key={`mapping-${index}`}>
-                      <td>
-                        <input
-                          type="text"
-                          value={mapping.label}
-                          onChange={e => updateColumnMapping(index, 'label', e.target.value)}
-                          placeholder="Label"
-                          className="input text-xs"
-                        />
-                      </td>
-                      <td>
-                        <select value={mapping.file1} onChange={e => updateColumnMapping(index, 'file1', e.target.value)} className="input text-xs">
-                          <option value="">Select column…</option>
-                          {file1Columns.map(col => <option key={col} value={col}>{col}</option>)}
-                        </select>
-                      </td>
-                      <td>
-                        <select value={mapping.file2} onChange={e => updateColumnMapping(index, 'file2', e.target.value)} className="input text-xs">
-                          <option value="">Select column…</option>
-                          {file2Columns.map(col => <option key={col} value={col}>{col}</option>)}
-                        </select>
-                      </td>
-                      <td>
-                        <button
-                          type="button"
-                          onClick={() => removeColumnMapping(index)}
-                          disabled={columnMappings.length <= 1}
-                          className="btn btn-secondary text-xs px-2 py-1 disabled:opacity-40"
-                        >
-                          Remove
-                        </button>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
+            <ColumnClassificationPanel
+              mappings={columnMappings}
+              file1Columns={file1Columns}
+              file2Columns={file2Columns}
+              onChangeCategoryOverride={(i, cat) => updateColumnMapping(i, 'category', cat)}
+              onChangeThreshold={(i, th) => updateColumnMapping(i, 'threshold', th)}
+              onChangeFile1Column={(i, col) => updateColumnMapping(i, 'file1', col)}
+              onChangeFile2Column={(i, col) => updateColumnMapping(i, 'file2', col)}
+              onChangeFieldLabel={(i, label) => updateColumnMapping(i, 'label', label)}
+              onRemoveMapping={removeColumnMapping}
+              onAddMapping={addColumnMapping}
+              onResetMappings={() => setColumnMappings([createEmptyMapping()])}
+            />
 
             <div className="flex flex-wrap items-center gap-3">
               <button type="button" onClick={addColumnMapping} className="btn btn-secondary text-xs">
@@ -2817,7 +2793,7 @@ export default function Comparison() {
               >
                 Clear all
               </button>
-              <button onClick={() => handleRun()} disabled={loading || !canRun} className="btn btn-primary text-xs">
+              <button onClick={() => handleRun()} disabled={loading || !canRun} className="btn btn-primary text-xs px-6">
                 {loading ? 'Comparing…' : 'Run Comparison'}
               </button>
             </div>
@@ -2859,71 +2835,71 @@ export default function Comparison() {
             <MetricCard title={`Only In ${selectedFileNames.fileB}`} value={formatNumber(result.summary.only_in_file2)} subtitle={`Employees missing from ${selectedFileNames.fileA}`} tone="green" />
           </div>
 
-          {/* ── Audit-mode results ─────────────────────────────────────────── */}
-          {mode === 'audit' && (
-            <>
-              <AIAuditPanel audit={result.ai_audit} />
+          {/* ── Detailed Comparison & Audit Results ─────────────────── */}
+          <AIAuditPanel audit={result.ai_audit} />
 
               <MatchingColumnsNotice matching={result.matching_columns} />
               <NameColumnsNotice names={result.name_columns} />
 
               <div className="grid grid-cols-1 xl:grid-cols-3 gap-4">
-                <div className="card p-4 xl:col-span-2 space-y-3">
-                  <div>
-                    <h2 className="text-sm font-medium text-slate-900">Coverage Across Both Files</h2>
-                    <p className="text-xs text-slate-500 mt-1">Shared employees versus records found in only one file.</p>
-                  </div>
-                  <StackedPresenceBar summary={result.summary} file1Name={selectedFileNames.fileA} file2Name={selectedFileNames.fileB} />
-                  {[1, 2].map(fileNumber => {
-                    const count = result.summary?.[`missing_basic_salary_count_file${fileNumber}`] || 0;
-                    const fileLabel = fileNumber === 1 ? selectedFileNames.fileA : selectedFileNames.fileB;
-                    const fileId = fileNumber === 1 ? file1 : file2;
-                    const dropStatus = basicSalaryDropStatus[fileId];
-                    if (!count && !dropStatus) return null;
-                    const rows = result[`missing_basic_salary_sample_file${fileNumber}`] || [];
-                    const download = result.files_created?.[`missing_basic_salary_file${fileNumber}`];
-                    return (
-                      <div key={fileNumber} className="pt-4 border-t border-rose-200 space-y-3">
-                        <div className="flex justify-between items-start gap-3">
-                          <div>
-                            <h3 className="text-sm font-semibold text-rose-800 flex items-center gap-1.5">
-                              <span>{count ? '⚠' : '✓'}</span> {count ? 'Flagged: Blank Basic Salary' : 'Basic Salary Cleanup'} in {fileLabel}
-                            </h3>
-                            <p className="text-xs text-slate-500 mt-1">
-                              {count
-                                ? `${count} row${count === 1 ? '' : 's'} have a blank or zero basic salary. Every flagged row is available in the CSV download.`
-                                : `No blank or zero basic salary rows remain. ${dropStatus.removedCount} row${dropStatus.removedCount === 1 ? '' : 's'} were dropped.`}
-                            </p>
-                            {dropStatus?.state === 'dropping' && <p className="text-xs text-amber-700 mt-1">Dropping flagged rows…</p>}
-                            {dropStatus?.state === 'failed' && <p className="text-xs text-rose-700 mt-1">Drop failed: {dropStatus.message}</p>}
-                          </div>
-                          <div className="flex items-center gap-3">
-                            {download && <button onClick={() => handleDownloadResult(download)} className="text-[10px] text-indigo-600 hover:text-indigo-800 font-semibold whitespace-nowrap">Download CSV</button>}
-                            {count > 0 && <button
-                              type="button"
-                              onClick={() => handleDropBlankBasicSalary(fileNumber)}
-                              disabled={droppingBasicSalaryFile === fileId || loading}
-                              className="text-[10px] text-rose-700 hover:text-rose-900 font-semibold whitespace-nowrap disabled:opacity-50"
-                            >
-                              {droppingBasicSalaryFile === fileId ? 'Dropping…' : 'Drop flagged rows'}
-                            </button>}
-                          </div>
-                        </div>
-                        <div className="max-h-48 overflow-y-auto text-xs divide-y divide-slate-100 bg-white rounded-lg border border-rose-200 px-3">
-                          {rows.map((row, index) => (
-                            <div key={`${row.employee_id}-${index}`} className="py-1.5 flex justify-between gap-2">
-                              <span className="font-mono text-slate-500">{row.employee_id || 'No ID'}</span>
-                              <span className="font-medium text-slate-700">{row.employee_name || '—'}</span>
-                              <span className="text-rose-600 font-mono">{row.basic_salary ?? 'Blank'}</span>
+                {mode === 'audit' && (
+                  <div className="card p-4 xl:col-span-2 space-y-3">
+                    <div>
+                      <h2 className="text-sm font-medium text-slate-900">Coverage Across Both Files</h2>
+                      <p className="text-xs text-slate-500 mt-1">Shared employees versus records found in only one file.</p>
+                    </div>
+                    <StackedPresenceBar summary={result.summary} file1Name={selectedFileNames.fileA} file2Name={selectedFileNames.fileB} />
+                    {[1, 2].map(fileNumber => {
+                      const count = result.summary?.[`missing_basic_salary_count_file${fileNumber}`] || 0;
+                      const fileLabel = fileNumber === 1 ? selectedFileNames.fileA : selectedFileNames.fileB;
+                      const fileId = fileNumber === 1 ? file1 : file2;
+                      const dropStatus = basicSalaryDropStatus[fileId];
+                      if (!count && !dropStatus) return null;
+                      const rows = result[`missing_basic_salary_sample_file${fileNumber}`] || [];
+                      const download = result.files_created?.[`missing_basic_salary_file${fileNumber}`];
+                      return (
+                        <div key={fileNumber} className="pt-4 border-t border-rose-200 space-y-3">
+                          <div className="flex justify-between items-start gap-3">
+                            <div>
+                              <h3 className="text-sm font-semibold text-rose-800 flex items-center gap-1.5">
+                                <span>{count ? '⚠' : '✓'}</span> {count ? 'Flagged: Blank Basic Salary' : 'Basic Salary Cleanup'} in {fileLabel}
+                              </h3>
+                              <p className="text-xs text-slate-500 mt-1">
+                                {count
+                                  ? `${count} row${count === 1 ? '' : 's'} have a blank or zero basic salary. Every flagged row is available in the CSV download.`
+                                  : `No blank or zero basic salary rows remain. ${dropStatus.removedCount} row${dropStatus.removedCount === 1 ? '' : 's'} were dropped.`}
+                              </p>
+                              {dropStatus?.state === 'dropping' && <p className="text-xs text-amber-700 mt-1">Dropping flagged rows…</p>}
+                              {dropStatus?.state === 'failed' && <p className="text-xs text-rose-700 mt-1">Drop failed: {dropStatus.message}</p>}
                             </div>
-                          ))}
+                            <div className="flex items-center gap-3">
+                              {download && <button onClick={() => handleDownloadResult(download)} className="text-[10px] text-indigo-600 hover:text-indigo-800 font-semibold whitespace-nowrap">Download CSV</button>}
+                              {count > 0 && <button
+                                type="button"
+                                onClick={() => handleDropBlankBasicSalary(fileNumber)}
+                                disabled={droppingBasicSalaryFile === fileId || loading}
+                                className="text-[10px] text-rose-700 hover:text-rose-900 font-semibold whitespace-nowrap disabled:opacity-50"
+                              >
+                                {droppingBasicSalaryFile === fileId ? 'Dropping…' : 'Drop flagged rows'}
+                              </button>}
+                            </div>
+                          </div>
+                          <div className="max-h-48 overflow-y-auto text-xs divide-y divide-slate-100 bg-white rounded-lg border border-rose-200 px-3">
+                            {rows.map((row, index) => (
+                              <div key={`${row.employee_id}-${index}`} className="py-1.5 flex justify-between gap-2">
+                                <span className="font-mono text-slate-500">{row.employee_id || 'No ID'}</span>
+                                <span className="font-medium text-slate-700">{row.employee_name || '—'}</span>
+                                <span className="text-rose-600 font-mono">{row.basic_salary ?? 'Blank'}</span>
+                              </div>
+                            ))}
+                          </div>
                         </div>
-                      </div>
-                    );
-                  })}
-                </div>
+                      );
+                    })}
+                  </div>
+                )}
 
-                <div className="card p-4 space-y-3">
+                <div className={`card p-4 space-y-3 ${mode === 'column' ? 'xl:col-span-3' : ''}`}>
                   <div>
                     <h2 className="text-sm font-medium text-slate-900">Payroll Impact</h2>
                     <p className="text-xs text-slate-500 mt-1">Largest variance across numeric fields.</p>
@@ -2945,19 +2921,21 @@ export default function Comparison() {
                 </div>
               </div>
 
-              <div className="grid grid-cols-1 xl:grid-cols-3 gap-4">
-                <div className="card p-4 xl:col-span-2 space-y-3">
-                  <div>
-                    <h2 className="text-sm font-medium text-slate-900">Difference Concentration By Field</h2>
-                    <p className="text-xs text-slate-500 mt-1">Fields with the largest difference volume are shown first.</p>
+              {mode === 'audit' && (
+                <div className="grid grid-cols-1 xl:grid-cols-3 gap-4">
+                  <div className="card p-4 xl:col-span-2 space-y-3">
+                    <div>
+                      <h2 className="text-sm font-medium text-slate-900">Difference Concentration By Field</h2>
+                      <p className="text-xs text-slate-500 mt-1">Fields with the largest difference volume are shown first.</p>
+                    </div>
+                    <FieldImpactChart fieldSummary={result.analytics?.field_summary} />
                   </div>
-                  <FieldImpactChart fieldSummary={result.analytics?.field_summary} />
+                  <div className="space-y-4">
+                    <PresenceList title={`Only In ${selectedFileNames.fileA}`} rows={result.presence_preview?.only_in_file1} tone="amber" />
+                    <PresenceList title={`Only In ${selectedFileNames.fileB}`} rows={result.presence_preview?.only_in_file2} tone="green" />
+                  </div>
                 </div>
-                <div className="space-y-4">
-                  <PresenceList title={`Only In ${selectedFileNames.fileA}`} rows={result.presence_preview?.only_in_file1} tone="amber" />
-                  <PresenceList title={`Only In ${selectedFileNames.fileB}`} rows={result.presence_preview?.only_in_file2} tone="green" />
-                </div>
-              </div>
+              )}
 
               {(result.summary?.missing_id_count_file1 > 0 || result.summary?.missing_id_count_file2 > 0) && (
                 <div className="card p-5 space-y-4 border-amber-200 bg-amber-50/20">
@@ -3033,7 +3011,9 @@ export default function Comparison() {
 
               {result.files_created && Object.keys(result.files_created).length > 0 && (
                 <div className="card p-4 space-y-2">
-                  <h2 className="text-sm font-medium text-slate-900">Download Audit Files</h2>
+                  <h2 className="text-sm font-medium text-slate-900">
+                    {mode === 'audit' ? 'Download Audit Files' : 'Download Comparison Files'}
+                  </h2>
                   <div className="flex flex-wrap gap-1.5">
                     {Object.entries(result.files_created).map(([name, id]) => (
                       <button key={name} onClick={() => handleDownloadResult(typeof id === 'object' ? id.file_id : id)} className="btn btn-secondary text-xs">
@@ -3050,43 +3030,53 @@ export default function Comparison() {
                   {/* Workbench Title Header */}
                   <div className="p-5 flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
                     <div>
-                      <h2 className="text-sm font-semibold text-slate-900">Reconciliation Review Workbench</h2>
+                      <h2 className="text-sm font-semibold text-slate-900">
+                        {mode === 'column' ? 'Column Comparison Workbench' : 'Reconciliation Review Workbench'}
+                      </h2>
                       <p className="text-xs text-slate-500 mt-1">
-                        Approve valid HR changes, reject incorrect differences, or ignore items that do not need action.
+                        {mode === 'column'
+                          ? 'Review differences flagged across matched columns for candidate employees.'
+                          : 'Approve valid HR changes, reject incorrect differences, or ignore items that do not need action.'}
                       </p>
                     </div>
                     <div className="flex flex-wrap gap-2.5 items-center">
-                      {/* Status filter tabs */}
-                      <div className="flex rounded-lg border border-slate-200 overflow-hidden bg-slate-50 p-0.5 text-xs font-medium">
-                        {['all', 'open', 'approved', 'rejected', 'ignored'].map(status => {
-                          const count = status === 'all'
-                            ? (reconciliationRun.issues || []).length
-                            : (reconciliationRun.status_counts?.[status] || 0);
+                      {/* Status filter tabs - only in audit mode */}
+                      {mode === 'audit' && (
+                        <div className="flex rounded-lg border border-slate-200 overflow-hidden bg-slate-50 p-0.5 text-xs font-medium">
+                          {['all', 'open', 'approved', 'rejected', 'ignored'].map(status => {
+                            const count = status === 'all'
+                              ? issuesWithDifferences.length
+                              : issuesWithDifferences.filter(issue => issue.status === status).length;
 
-                          const isActive = reconFilter === status;
-                          return (
-                            <button
-                              key={status}
-                              type="button"
-                              onClick={() => { setReconFilter(status); setReconPage(1); }}
-                              className={`px-2.5 py-1 rounded transition-all capitalize ${isActive
-                                  ? 'bg-white text-slate-900 shadow-sm border border-slate-200/40'
-                                  : 'text-slate-500 hover:text-slate-700 hover:bg-white/40'
-                                }`}
-                            >
-                              {status} ({count})
-                            </button>
-                          );
-                        })}
-                      </div>
+                            const isActive = reconFilter === status;
+                            return (
+                              <button
+                                key={status}
+                                type="button"
+                                onClick={() => { setReconFilter(status); setReconPage(1); }}
+                                className={`px-2.5 py-1 rounded transition-all capitalize ${isActive
+                                    ? 'bg-white text-slate-900 shadow-sm border border-slate-200/40'
+                                    : 'text-slate-500 hover:text-slate-700 hover:bg-white/40'
+                                  }`}
+                              >
+                                {status} ({count})
+                              </button>
+                            );
+                          })}
+                        </div>
+                      )}
 
-                      <button
-                        onClick={handleExportApprovedUpdates}
-                        disabled={exportingReconciliation || approvedIssueCount === 0}
-                        className="btn btn-primary text-xs disabled:opacity-40"
-                      >
-                        {exportingReconciliation ? 'Exporting…' : 'Export Approved HR Updates'}
-                      </button>
+                      {/* Export Approved HR Updates - only in audit mode */}
+                      {mode === 'audit' && (
+                        <button
+                          onClick={handleExportApprovedUpdates}
+                          disabled={exportingReconciliation || approvedIssueCount === 0}
+                          className="btn btn-primary text-xs disabled:opacity-40"
+                        >
+                          {exportingReconciliation ? 'Exporting…' : 'Export Approved HR Updates'}
+                        </button>
+                      )}
+
                       <button
                         onClick={handleExportRoleDifferences}
                         disabled={exportingRoleDifferences || roleDifferenceCount === 0}
@@ -3094,7 +3084,7 @@ export default function Comparison() {
                       >
                         {exportingRoleDifferences ? 'Exporting...' : `Export Role Differences (${roleDifferenceCount})`}
                       </button>
-                      {unmatchedEmployeeIds.length > 0 && (
+                      {unmatchedEmployeeIds.length > 0 && mode === 'audit' && (
                         <button
                           type="button"
                           onClick={handleRunNameBasedAudit}
@@ -3103,7 +3093,7 @@ export default function Comparison() {
                         >
                           {runningNameAudit
                             ? 'Running Name-Based Audit...'
-                            : `Run Name-Based Audit (${unmatchedEmployeeIds.length})`}
+                            : `Compare Unmatched by Name (${unmatchedEmployeeIds.length})`}
                         </button>
                       )}
                     </div>
@@ -3121,27 +3111,29 @@ export default function Comparison() {
                         className="input text-xs w-full sm:w-64 py-1.5"
                       />
 
-                      {/* Issue Type Select */}
-                      <select
-                        value={reconTypeFilter}
-                        onChange={e => { setReconTypeFilter(e.target.value); setReconPage(1); }}
-                        className="input text-xs w-full sm:w-52 py-1.5"
-                      >
-                        <option value="all">All Issue Types</option>
-                        <option value="basic_salary_change">Basic Salary Changes</option>
-                        <option value="annual_salary_change">Annual Salary Changes</option>
-                        <option value="take_home_change">Take Home Changes</option>
-                        <option value="salary_change">Other Salary Changes</option>
-                        <option value="allowance_change">Allowance Changes</option>
-                        <option value="statutory_deduction_change">Statutory Deduction Changes</option>
-                        <option value="non_statutory_deduction_change">Non-Statutory Deduction Changes</option>
-                        <option value="deduction_change">Deduction Changes</option>
-                        <option value="rank_change">Rank / Grade Changes</option>
-                        <option value="branch_change">Branch Changes</option>
-                        <option value="potential_new_hire">New Hires</option>
-                        <option value="potential_resignation">Resignations</option>
-                        <option value="field_mismatch">Other Field Mismatches</option>
-                      </select>
+                      {/* Issue Type Select - only in audit mode */}
+                      {mode === 'audit' && (
+                        <select
+                          value={reconTypeFilter}
+                          onChange={e => { setReconTypeFilter(e.target.value); setReconPage(1); }}
+                          className="input text-xs w-full sm:w-52 py-1.5"
+                        >
+                          <option value="all">All Issue Types</option>
+                          <option value="basic_salary_change">Basic Salary Changes</option>
+                          <option value="annual_salary_change">Annual Salary Changes</option>
+                          <option value="take_home_change">Take Home Changes</option>
+                          <option value="salary_change">Other Salary Changes</option>
+                          <option value="allowance_change">Allowance Changes</option>
+                          <option value="statutory_deduction_change">Statutory Deduction Changes</option>
+                          <option value="non_statutory_deduction_change">Non-Statutory Deduction Changes</option>
+                          <option value="deduction_change">Deduction Changes</option>
+                          <option value="rank_change">Rank / Grade Changes</option>
+                          <option value="branch_change">Branch Changes</option>
+                          <option value="potential_new_hire">New Hires</option>
+                          <option value="potential_resignation">Resignations</option>
+                          <option value="field_mismatch">Other Field Mismatches</option>
+                        </select>
+                      )}
 
                       <select
                         value={reconDifferenceOperator}
@@ -3173,11 +3165,11 @@ export default function Comparison() {
                         type="button"
                         onClick={selectedFilteredEmployeeCount === filteredEmployeeIds.length ? clearFilteredEmployeeSelection : selectFilteredEmployees}
                         disabled={filteredEmployeeIds.length === 0}
-                        className="text-indigo-700 hover:text-indigo-900 disabled:opacity-40"
+                        className="text-indigo-700 hover:text-indigo-900 disabled:opacity-40 font-medium"
                       >
                         {selectedFilteredEmployeeCount === filteredEmployeeIds.length
-                          ? `Clear ${filteredEmployeeIds.length} filtered candidates`
-                          : `Select all ${filteredEmployeeIds.length} filtered candidates`}
+                          ? 'Clear Candidates'
+                          : 'Select all Candidates'}
                       </button>
                     </div>
                   </div>
@@ -3206,8 +3198,8 @@ export default function Comparison() {
                     </div>
                   )}
 
-                  {/* Bulk Action panel */}
-                  {filteredIssues.length > 0 && (
+                  {/* Bulk Action panel - only in audit mode */}
+                  {mode === 'audit' && filteredIssues.length > 0 && (
                     <div className="bg-blue-50/50 px-5 py-3 flex flex-wrap items-center justify-between gap-3">
                       <div className="text-xs font-semibold text-blue-900 flex items-center gap-1.5">
                         <span className="inline-block w-2 h-2 rounded-full bg-blue-500 animate-pulse" />
@@ -3272,14 +3264,14 @@ export default function Comparison() {
                           <th className="w-8">
                             <input
                               type="checkbox"
-                              title="Select all employees in the current filter"
-                              aria-label="Select all employees in the current filter"
-                              disabled={filteredEmployeeIds.length === 0}
-                              checked={filteredEmployeeIds.length > 0 && filteredEmployeeIds.every(id => selectedEmployeeIds.has(id))}
-                              onChange={toggleFilteredEmployeeSelection}
+                              title="Select all previewed employees on this page"
+                              aria-label="Select all previewed employees on this page"
+                              disabled={visibleEmployeeIds.length === 0}
+                              checked={visibleEmployeeIds.length > 0 && visibleEmployeeIds.every(id => selectedEmployeeIds.has(id))}
+                              onChange={toggleVisibleEmployeeSelection}
                             />
                           </th>
-                          <th>Status</th>
+                          {mode === 'audit' && <th>Status</th>}
                           <th>Issue</th>
                           <th>Employee</th>
                           <th>Field</th>
@@ -3292,11 +3284,15 @@ export default function Comparison() {
                       </thead>
                       <tbody>
                         {visibleReconciliationIssues.map(issue => {
-                          const isNumeric = issue.old_value !== null && issue.new_value !== null &&
-                            !isNaN(parseFloat(String(issue.old_value).replace(/,/g, ''))) &&
-                            !isNaN(parseFloat(String(issue.new_value).replace(/,/g, '')));
+                          const hasDiff = issue.difference !== null && issue.difference !== undefined && issue.difference !== '' && !isNaN(Number(issue.difference));
+                          const parsedOld = parseNumericValue(issue.old_value);
+                          const parsedNew = parseNumericValue(issue.new_value);
+                          const isNumeric = hasDiff || (!isNaN(parsedOld) && !isNaN(parsedNew));
 
-                          const diff = issue.difference;
+                          const diff = hasDiff
+                            ? Number(issue.difference)
+                            : (!isNaN(parsedOld) && !isNaN(parsedNew) ? parsedNew - parsedOld : null);
+
                           const isPos = diff > 0;
                           const isZero = diff !== null && Math.abs(diff) < 0.0001;
 
@@ -3320,11 +3316,13 @@ export default function Comparison() {
                                   onChange={() => toggleEmployeeSelection(issue.employee_id)}
                                 />
                               </td>
-                              <td>
-                                <span className={statusBadgeClass}>
-                                  {issue.status}
-                                </span>
-                              </td>
+                              {mode === 'audit' && (
+                                <td>
+                                  <span className={statusBadgeClass}>
+                                    {issue.status}
+                                  </span>
+                                </td>
+                              )}
                               <td>
                                 <div className="font-semibold text-slate-800 text-xs">{issue.issue_type.replaceAll('_', ' ')}</div>
                                 <div className="text-[10px] text-slate-400 font-medium mt-0.5">{Math.round((issue.confidence || 0) * 100)}% confidence</div>
@@ -3336,26 +3334,30 @@ export default function Comparison() {
                               <td className="text-xs font-medium text-slate-700">{issue.field || '-'}</td>
                               <td>
                                 <div className="px-2 py-0.5 bg-slate-50 border border-slate-200/60 rounded-md font-mono text-[11px] text-slate-700 min-w-[70px] text-right shadow-sm inline-block">
-                                  {isNumeric ? formatCurrency(issue.old_value) : (issue.old_value ?? '-')}
+                                  {!isNaN(parsedOld) ? formatCurrency(parsedOld) : (issue.old_value ?? '-')}
                                 </div>
                               </td>
                               <td>
                                 <div className="px-2 py-0.5 bg-indigo-50/50 border border-indigo-100 rounded-md font-mono text-[11px] text-indigo-900 min-w-[70px] text-right shadow-sm inline-block">
-                                  {isNumeric ? formatCurrency(issue.new_value) : (issue.new_value ?? '-')}
+                                  {!isNaN(parsedNew) ? formatCurrency(parsedNew) : (issue.new_value ?? '-')}
                                 </div>
                               </td>
                               <td>
                                 {isNumeric && diff !== null ? (
-                                  <div className={`px-2 py-0.5 ${bgClass} border ${borderClass} rounded-md font-mono text-[11px] ${colorClass} min-w-[65px] text-right shadow-sm inline-block`}>
-                                    {isZero ? '0.00' : `${isPos ? '+' : ''}${formatCurrency(diff)}`}
-                                  </div>
+                                  !isZero && (
+                                    <div className={`px-2 py-0.5 ${bgClass} border ${borderClass} rounded-md font-mono text-[11px] ${colorClass} min-w-[65px] text-right shadow-sm inline-block`}>
+                                      {`${isPos ? '+' : ''}${formatCurrency(diff)}`}
+                                    </div>
+                                  )
                                 ) : (
                                   <span className="text-slate-400 text-[10px] italic font-medium">Text change</span>
                                 )}
                               </td>
                               <td>
                                 <div className="max-w-[200px] text-[11px] text-slate-700 leading-relaxed font-medium">{issue.explanation}</div>
-                                <div className="text-[10px] text-slate-400 mt-1 italic">{issue.suggested_action}</div>
+                                {mode === 'audit' && issue.suggested_action && (
+                                  <div className="text-[10px] text-slate-400 mt-1 italic">{issue.suggested_action}</div>
+                                )}
                               </td>
                               <td>
                                 <div className="flex flex-wrap gap-1">
@@ -3366,41 +3368,45 @@ export default function Comparison() {
                                   >
                                     Investigate
                                   </button>
-                                  {issue.status !== 'approved' && (
-                                    <button
-                                      onClick={() => handleReconciliationAction(issue.id, 'approve')}
-                                      disabled={reconciliationActionId === issue.id}
-                                      className="text-[11px] px-2 py-1 rounded border font-semibold bg-emerald-50 hover:bg-emerald-100/80 border-emerald-200 text-emerald-700 disabled:opacity-40 transition-colors shadow-sm"
-                                    >
-                                      Approve
-                                    </button>
-                                  )}
-                                  {issue.status !== 'rejected' && (
-                                    <button
-                                      onClick={() => handleReconciliationAction(issue.id, 'reject')}
-                                      disabled={reconciliationActionId === issue.id}
-                                      className="text-[11px] px-2 py-1 rounded border font-semibold bg-rose-50 hover:bg-rose-100/80 border-rose-200 text-rose-700 disabled:opacity-40 transition-colors shadow-sm"
-                                    >
-                                      Reject
-                                    </button>
-                                  )}
-                                  {issue.status !== 'ignored' && (
-                                    <button
-                                      onClick={() => handleReconciliationAction(issue.id, 'ignore')}
-                                      disabled={reconciliationActionId === issue.id}
-                                      className="text-[11px] px-2 py-1 rounded border font-semibold bg-slate-50 hover:bg-slate-100/80 border-slate-200 text-slate-600 disabled:opacity-40 transition-colors shadow-sm"
-                                    >
-                                      Ignore
-                                    </button>
-                                  )}
-                                  {issue.status !== 'open' && (
-                                    <button
-                                      onClick={() => handleReconciliationAction(issue.id, 'reopen')}
-                                      disabled={reconciliationActionId === issue.id}
-                                      className="text-[11px] px-2 py-1 rounded border font-semibold bg-blue-50 hover:bg-blue-100/80 border-blue-200 text-blue-700 disabled:opacity-40 transition-colors shadow-sm"
-                                    >
-                                      Reopen
-                                    </button>
+                                  {mode === 'audit' && (
+                                    <>
+                                      {issue.status !== 'approved' && (
+                                        <button
+                                          onClick={() => handleReconciliationAction(issue.id, 'approve')}
+                                          disabled={reconciliationActionId === issue.id}
+                                          className="text-[11px] px-2 py-1 rounded border font-semibold bg-emerald-50 hover:bg-emerald-100/80 border-emerald-200 text-emerald-700 disabled:opacity-40 transition-colors shadow-sm"
+                                        >
+                                          Approve
+                                        </button>
+                                      )}
+                                      {issue.status !== 'rejected' && (
+                                        <button
+                                          onClick={() => handleReconciliationAction(issue.id, 'reject')}
+                                          disabled={reconciliationActionId === issue.id}
+                                          className="text-[11px] px-2 py-1 rounded border font-semibold bg-rose-50 hover:bg-rose-100/80 border-rose-200 text-rose-700 disabled:opacity-40 transition-colors shadow-sm"
+                                        >
+                                          Reject
+                                        </button>
+                                      )}
+                                      {issue.status !== 'ignored' && (
+                                        <button
+                                          onClick={() => handleReconciliationAction(issue.id, 'ignore')}
+                                          disabled={reconciliationActionId === issue.id}
+                                          className="text-[11px] px-2 py-1 rounded border font-semibold bg-slate-50 hover:bg-slate-100/80 border-slate-200 text-slate-600 disabled:opacity-40 transition-colors shadow-sm"
+                                        >
+                                          Ignore
+                                        </button>
+                                      )}
+                                      {issue.status !== 'open' && (
+                                        <button
+                                          onClick={() => handleReconciliationAction(issue.id, 'reopen')}
+                                          disabled={reconciliationActionId === issue.id}
+                                          className="text-[11px] px-2 py-1 rounded border font-semibold bg-blue-50 hover:bg-blue-100/80 border-blue-200 text-blue-700 disabled:opacity-40 transition-colors shadow-sm"
+                                        >
+                                          Reopen
+                                        </button>
+                                      )}
+                                    </>
                                   )}
                                 </div>
                               </td>
@@ -3408,7 +3414,7 @@ export default function Comparison() {
                           );
                         })}
                         {visibleReconciliationIssues.length === 0 && (
-                          <tr><td colSpan={10} className="text-center py-6 text-sm text-slate-500">No reconciliation issues found.</td></tr>
+                          <tr><td colSpan={mode === 'audit' ? 10 : 9} className="text-center py-6 text-sm text-slate-500">No reconciliation issues found.</td></tr>
                         )}
                       </tbody>
                     </table>
@@ -3466,48 +3472,8 @@ export default function Comparison() {
                   )}
                 </div>
               )}
-            </>
-          )}
 
-          {/* ── Column-comparison results ──────────────────────────────────── */}
-          {mode === 'column' && (
-            <>
-              <MatchingColumnsNotice matching={result.matching_columns} />
-              {(result.duplicate_id_samples?.file1?.length > 0 || result.duplicate_id_samples?.file2?.length > 0) && (
-                <div className="card p-4 space-y-2">
-                  <h2 className="text-sm font-medium text-slate-900">Duplicate ID Samples</h2>
-                  {result.duplicate_id_samples.file1?.length > 0 && <p className="text-xs text-slate-600">File 1: {result.duplicate_id_samples.file1.join(', ')}</p>}
-                  {result.duplicate_id_samples.file2?.length > 0 && <p className="text-xs text-slate-600">File 2: {result.duplicate_id_samples.file2.join(', ')}</p>}
-                </div>
-              )}
-              {result.files_created && Object.keys(result.files_created).length > 0 && (
-                <div className="card p-4 space-y-2">
-                  <h2 className="text-sm font-medium text-slate-900">Download Comparison Files</h2>
-                  <div className="flex flex-wrap gap-1.5">
-                    {Object.entries(result.files_created).map(([name, id]) => (
-                      <button key={name} onClick={() => handleDownloadResult(typeof id === 'object' ? id.file_id : id)} className="btn btn-secondary text-xs">
-                        {auditFileDisplayName(name)}
-                      </button>
-                    ))}
-                  </div>
-                </div>
-              )}
-            </>
-          )}
 
-          {/* Differences table — both modes */}
-          {mode !== 'audit' && (
-            <div className="card p-4">
-              <div className="flex items-center justify-between gap-4 mb-3">
-                <div>
-                  <h2 className="text-sm font-medium text-slate-900">Column Differences</h2>
-                  <p className="text-xs text-slate-500 mt-1">Rows where the compared columns differ.</p>
-                </div>
-                <span className="badge badge-gray">{formatNumber(result.preview_differences?.length || 0)} preview rows</span>
-              </div>
-              <DataTable data={result.preview_differences || []} columns={previewColumns} allowHorizontalScroll={true} />
-            </div>
-          )}
         </div>
       )}
 

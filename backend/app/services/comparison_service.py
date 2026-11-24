@@ -314,6 +314,27 @@ class ComparisonService:
         return ' '.join(text.upper().split())
 
     @staticmethod
+    def _formatted_numeric_value(value: Any) -> Tuple[Optional[float], bool]:
+        if value is None or pd.isna(value):
+            return 0.0, True
+        if isinstance(value, (int, float, np.number)):
+            return float(value), False
+
+        text = str(value).strip()
+        if text in ('', '-', '–', '—', '−'):
+            return 0.0, True
+
+        has_amount_format = any(marker in text for marker in (',', '.', 'GH₵', 'GHȼ', '₵'))
+        cleaned = text.replace(',', '').replace('"', '').replace('GH₵', '').replace('GHȼ', '').replace('₵', '')
+        try:
+            number = float(cleaned)
+        except ValueError:
+            return None, False
+        if not math.isfinite(number):
+            return None, False
+        return number, has_amount_format
+
+    @staticmethod
     def _name_tokens(value: Any) -> set:
         if pd.isna(value):
             return set()
@@ -468,6 +489,11 @@ class ComparisonService:
         if value_type in ('currency', 'number', 'numeric'):
             return abs(float(normalized2) - float(normalized1)) > tolerance
 
+        numeric1, formatted1 = ComparisonService._formatted_numeric_value(value1)
+        numeric2, formatted2 = ComparisonService._formatted_numeric_value(value2)
+        if numeric1 is not None and numeric2 is not None and (formatted1 or formatted2):
+            return numeric1 != numeric2
+
         return normalized1 != normalized2
 
     @staticmethod
@@ -524,9 +550,9 @@ class ComparisonService:
 
         payload_cols1 = [merge_col, id_col1]
         payload_cols2 = [merge_col, id_col2]
-        if name_col1 and name_col1 in df1_work.columns:
+        if name_col1 and name_col1 in df1_work.columns and name_col1 not in payload_cols1:
             payload_cols1.append(name_col1)
-        if name_col2 and name_col2 in df2_work.columns:
+        if name_col2 and name_col2 in df2_work.columns and name_col2 not in payload_cols2:
             payload_cols2.append(name_col2)
 
         for mapping in column_mappings:
